@@ -262,14 +262,14 @@ export function MenuComponent({ isGamepadEnabled, onGamepadToggle }) {
 		const renderMenuFooter = () => (
 			<div className="border-t p-2">
 				<div className="flex items-center justify-between">
-					<a href="https://github.com/selkies-project/selkies" target="_blank" rel="noopener noreferrer">
+					{/* <a href="https://github.com/selkies-project/selkies" target="_blank" rel="noopener noreferrer">
 						<img
 							src="/horizontal.png"
 							alt="footer Logo"
 							className="h-7 object-contain"
 						/>
-					</a>
-					{/* <span className="text-lg font-bold">Selkies</span> */}
+					</a> */}
+					<span className="text-lg font-bold">JeevOps</span>
 					<ModeToggle />
 				</div>
 			</div>
