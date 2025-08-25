@@ -7,7 +7,7 @@
     const MAX_AXES = 4;
     const PREVIEW_SCALE = 0.15;
 
-    const SAFE_AREA_PADDING = { top: 10, right: 15, bottom: 20, left: 15 };
+    const SAFE_AREA_PADDING = { top: 10, right: 15, bottom: 10, left: 15 };
     const HIT_TEST_SLOP = 10;
 
     const STICK_TAP_DURATION_THRESHOLD = 250;
@@ -52,6 +52,14 @@
             <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8h5z"/>
         </svg>
     `;
+
+    function setRealViewportHeight() {
+      const vh = window.innerHeight * 0.01;
+      document.documentElement.style.setProperty('--vh', `${vh}px`);
+    }
+    window.addEventListener('resize', setRealViewportHeight);
+    window.addEventListener('orientationchange', setRealViewportHeight);
+    setRealViewportHeight();
 
     let hostAnchorElement = null;
     let currentProfileName = 'eightBit';
@@ -673,7 +681,7 @@
         isProfileSelectorVisible = true;
         profileSelectorOverlayElement = document.createElement('div');
         Object.assign(profileSelectorOverlayElement.style, {
-            position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
+            position: 'fixed', top: '0', left: '0', width: '100vw', height: 'calc(var(--vh, 1vh) * 100)',
             backgroundColor: 'rgba(0, 0, 0, 0.75)',
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
             zIndex: '2147483640', pointerEvents: 'auto',
@@ -767,7 +775,7 @@
             gamepadControlsOverlayElement.id = 'universal-touch-gamepad-controls-overlay';
             Object.assign(gamepadControlsOverlayElement.style, {
                 position: 'fixed', top: '0', left: '0',
-                width: '100vw', height: '100vh',
+                width: '100vw', height: 'calc(var(--vh, 1vh) * 100)',
                 zIndex: '2000',
                 pointerEvents: 'none',
                 overflow: 'hidden' 

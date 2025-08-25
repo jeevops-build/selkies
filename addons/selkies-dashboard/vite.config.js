@@ -8,6 +8,9 @@ export default defineConfig({
   server: {
     host: '0.0.0.0'
   },
+  build: {
+    target: 'chrome94'
+  },
   plugins: [
     react({
       exclude: 'src/selkies-core.js'

@@ -10,40 +10,20 @@
                 window.location.reload();
             });
         }
-        function hideParentDirectoryLinkOnRoot() {
-            const h1Element = document.querySelector('h1');
-            let isAtListingRoot = false;
 
-            if (h1Element) {
-                const displayedPathInH1 = h1Element.textContent.trim();
-                // Check if H1 content indicates the root of this specific listing
-                if (displayedPathInH1 === "/files/") { // Condition for user-added H1
-                    isAtListingRoot = true;
-                }
-            } else {
-                // Fallback: If no H1, check for "Index of /files/" text node before the table
-                // This assumes Nginx might output "Index of /files/" directly
-                const tableElement = document.getElementById('list');
-                if (tableElement) {
-                    let currentNode = tableElement.previousSibling;
-                    let foundPathText = null;
-                    while (currentNode) {
-                        if (currentNode.nodeType === Node.TEXT_NODE) {
-                            const text = currentNode.textContent.trim();
-                            if (text.startsWith("Index of /")) {
-                                foundPathText = text.replace(/<\/h1>$/i, '').trim();
-                                break;
-                            }
-                        }
-                        currentNode = currentNode.previousSibling;
-                    }
-                    if (foundPathText === "Index of /files/") { // Condition for Nginx-generated text
-                        isAtListingRoot = true;
-                    }
-                }
+        function processDirectoryListing() {
+            const webPathPrefix = '/files/';
+            const diskPathPrefix = '/config/Desktop/';
+            const h1 = document.querySelector('h1');
+
+            if (h1) {
+                const originalText = h1.textContent;
+                const newText = originalText.replace(webPathPrefix, diskPathPrefix);
+                h1.textContent = newText;
             }
 
-            if (isAtListingRoot) {
+            const isAtRoot = window.location.pathname === webPathPrefix;
+            if (isAtRoot) {
                 const parentLink = document.querySelector('table#list td.link a[href="../"]');
                 if (parentLink && parentLink.textContent.trim() === "Parent directory/") {
                     const parentRow = parentLink.closest('tr');
@@ -55,21 +35,20 @@
         }
 
         let attempts = 0;
-        const maxAttempts = 20; // Try for 2 seconds
+        const maxAttempts = 20;
         const intervalId = setInterval(function() {
             attempts++;
             const h1 = document.querySelector('h1');
             const table = document.getElementById('list');
 
-            if (h1 || table) { // If either H1 or table is present, attempt to run
+            if (h1 && table) {
                 clearInterval(intervalId);
-                hideParentDirectoryLinkOnRoot();
+                processDirectoryListing();
             } else if (attempts >= maxAttempts) {
                 clearInterval(intervalId);
-                // Attempt to run even if elements not detected by querySelector, as a last resort
-                hideParentDirectoryLinkOnRoot();
+                processDirectoryListing();
             }
-        }, 100); // Check every 100ms
+        }, 100);
 
     </script>
 </body>

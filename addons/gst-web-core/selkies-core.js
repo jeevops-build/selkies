@@ -11,6 +11,7 @@ import {
   Input
 } from './lib/input.js';
 let decoder;
+let isSidebarOpen = false;
 let audioDecoderWorker = null;
 let canvas = null;
 let canvasContext = null;
@@ -40,9 +41,13 @@ let micWorkletNode = null;
 let preferredInputDeviceId = null;
 let preferredOutputDeviceId = null;
 let metricsIntervalId = null;
-const METRICS_INTERVAL_MS = 50;
+let backpressureIntervalId = null;
+const METRICS_INTERVAL_MS = 500;
+const BACKPRESSURE_INTERVAL_MS = 50;
 const UPLOAD_CHUNK_SIZE = (1024 * 1024) - 1;
-// Elements for resolution controls
+const FILE_UPLOAD_THROTTLE_MS = 200;
+let fileUploadProgressLastSent = {};
+// Resources for resolution controls
 window.isManualResolutionMode = false;
 let manualWidth = null;
 let manualHeight = null;
@@ -53,6 +58,13 @@ let wakeLockSentinel = null;
 let currentEncoderMode = 'x264enc-stiped';
 let useCssScaling = false;
 let trackpadMode = false;
+let scalingDPI = 96;
+let antiAliasingEnabled = true;
+function setRealViewportHeight() {
+  const vh = window.innerHeight * 0.01;
+  document.documentElement.style.setProperty('--vh', `${vh}px`);
+}
+
 
 let detectedSharedModeType = null;
 let playerInputTargetIndex = 0; // Default for primary player
@@ -78,6 +90,7 @@ let sharedProbingTimeoutId = null;
 let sharedProbingAttempts = 0;
 const MAX_SHARED_PROBING_ATTEMPTS = 3; // e.g., initial + 2 retries
 const isSharedMode = detectedSharedModeType !== null;
+let sharedClientHasReceivedKeyframe = false;
 
 if (isSharedMode) {
   console.log(`Client is running in ${detectedSharedModeType} mode.`);
@@ -87,31 +100,34 @@ window.onload = () => {
   'use strict';
 };
 
-function getCookieValue(name) {
-  const b = document.cookie.match(`(^|[^;]+)\\s*${name}\\s*=\\s*([^;]+)`);
-  return b ? b.pop() : '';
-}
-// Set app name from manifest if possible
-let appName = 'Selkies';
-document.title = appName;
-!async function() {
-  try {
-    const t = await fetch("manifest.json", {
-      signal: AbortSignal.timeout(500)
-    });
-    if (t.ok) {
-      const a = await t.json();
-      appName = a.name;
-      document.title = `${appName}`;
+// Set storage key based on URL
+const urlForKey = window.location.href.split('#')[0];
+const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+
+// Set page title
+document.title = 'Selkies';
+fetch('manifest.json')
+  .then(response => response.json())
+  .then(manifest => {
+    if (manifest.name) {
+      document.title = manifest.name;
     }
-  } catch (t) {}
-}();
+  })
+  .catch(() => {
+    // Pass
+  });
 
 let videoBitRate = 8000;
 let videoFramerate = 60;
 let videoCRF = 25;
 let h264_fullcolor = false;
 let h264_streaming_mode = false;
+let jpegQuality = 60;
+let paintOverJpegQuality = 90;
+let useCpu = false;
+let h264_paintover_crf = 18;
+let h264_paintover_burst_frames = 5;
+let use_paint_over_quality = true;
 let audioBitRate = 320000;
 let showStart = true;
 let status = 'connecting';
@@ -148,6 +164,10 @@ const cpuStat = {
   serverMemoryTotal: 0,
   serverMemoryUsed: 0,
 };
+const networkStat = {
+  bandwidthMbps: 0,
+  latencyMs: 0,
+};
 let resizeRemote = true;
 let debug = false;
 let streamStarted = false;
@@ -163,15 +183,14 @@ let videoElement;
 let audioElement;
 let playButtonElement;
 let overlayInput;
-let currentServerCursor = 'auto';
 
 const getIntParam = (key, default_value) => {
-  const prefixedKey = `${appName}_${key}`;
+  const prefixedKey = `${storageAppName}_${key}`;
   const value = window.localStorage.getItem(prefixedKey);
   return (value === null || value === undefined) ? default_value : parseInt(value);
 };
 const setIntParam = (key, value) => {
-  const prefixedKey = `${appName}_${key}`;
+  const prefixedKey = `${storageAppName}_${key}`;
   if (value === null || value === undefined) {
     window.localStorage.removeItem(prefixedKey);
   } else {
@@ -179,7 +198,7 @@ const setIntParam = (key, value) => {
   }
 };
 const getBoolParam = (key, default_value) => {
-  const prefixedKey = `${appName}_${key}`;
+  const prefixedKey = `${storageAppName}_${key}`;
   const v = window.localStorage.getItem(prefixedKey);
   if (v === null) {
     return default_value;
@@ -187,7 +206,7 @@ const getBoolParam = (key, default_value) => {
   return v.toString().toLowerCase() === 'true';
 };
 const setBoolParam = (key, value) => {
-  const prefixedKey = `${appName}_${key}`;
+  const prefixedKey = `${storageAppName}_${key}`;
   if (value === null || value === undefined) {
     window.localStorage.removeItem(prefixedKey);
   } else {
@@ -195,12 +214,12 @@ const setBoolParam = (key, value) => {
   }
 };
 const getStringParam = (key, default_value) => {
-  const prefixedKey = `${appName}_${key}`;
+  const prefixedKey = `${storageAppName}_${key}`;
   const value = window.localStorage.getItem(prefixedKey);
   return (value === null || value === undefined) ? default_value : value;
 };
 const setStringParam = (key, value) => {
-  const prefixedKey = `${appName}_${key}`;
+  const prefixedKey = `${storageAppName}_${key}`;
   if (value === null || value === undefined) {
     window.localStorage.removeItem(prefixedKey);
   } else {
@@ -209,20 +228,51 @@ const setStringParam = (key, value) => {
 };
 
 videoBitRate = getIntParam('videoBitRate', videoBitRate);
+setIntParam('videoBitRate', videoBitRate);
 videoFramerate = getIntParam('videoFramerate', videoFramerate);
+setIntParam('videoFramerate', videoFramerate);
 videoCRF = getIntParam('videoCRF', videoCRF);
+setIntParam('videoCRF', videoCRF);
 h264_fullcolor = getBoolParam('h264_fullcolor', h264_fullcolor);
+setBoolParam('h264_fullcolor', h264_fullcolor);
 h264_streaming_mode = getBoolParam('h264_streaming_mode', h264_streaming_mode);
+setBoolParam('h264_streaming_mode', h264_streaming_mode);
+jpegQuality = getIntParam('jpegQuality', jpegQuality);
+setIntParam('jpegQuality', jpegQuality);
+paintOverJpegQuality = getIntParam('paintOverJpegQuality', paintOverJpegQuality);
+setIntParam('paintOverJpegQuality', paintOverJpegQuality);
+useCpu = getBoolParam('useCpu', useCpu);
+setBoolParam('useCpu', useCpu);
+h264_paintover_crf = getIntParam('h264_paintover_crf', h264_paintover_crf);
+setIntParam('h264_paintover_crf', h264_paintover_crf);
+h264_paintover_burst_frames = getIntParam('h264_paintover_burst_frames', h264_paintover_burst_frames);
+setIntParam('h264_paintover_burst_frames', h264_paintover_burst_frames);
+use_paint_over_quality = getBoolParam('use_paint_over_quality', use_paint_over_quality);
+setBoolParam('use_paint_over_quality', use_paint_over_quality);
 audioBitRate = getIntParam('audioBitRate', audioBitRate);
+setIntParam('audioBitRate', audioBitRate);
 resizeRemote = getBoolParam('resizeRemote', resizeRemote);
+setBoolParam('resizeRemote', resizeRemote);
 debug = getBoolParam('debug', debug);
+setBoolParam('debug', debug);
 videoBufferSize = getIntParam('videoBufferSize', 0);
+setIntParam('videoBufferSize', videoBufferSize);
 currentEncoderMode = getStringParam('encoder', 'x264enc');
+setStringParam('encoder', currentEncoderMode);
 scaleLocallyManual = getBoolParam('scaleLocallyManual', true);
+setBoolParam('scaleLocallyManual', scaleLocallyManual);
 isManualResolutionMode = getBoolParam('isManualResolutionMode', false);
+setBoolParam('isManualResolutionMode', isManualResolutionMode);
 isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
+setBoolParam('isGamepadEnabled', isGamepadEnabled);
 useCssScaling = getBoolParam('useCssScaling', false);
+setBoolParam('useCssScaling', useCssScaling);
 trackpadMode = getBoolParam('trackpadMode', false);
+setBoolParam('trackpadMode', trackpadMode);
+scalingDPI = getIntParam('SCALING_DPI', 96);
+setIntParam('SCALING_DPI', scalingDPI);
+antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
+setBoolParam('antiAliasingEnabled', antiAliasingEnabled);
 
 if (isSharedMode) {
     manualWidth = 1280;
@@ -230,11 +280,10 @@ if (isSharedMode) {
     console.log(`Shared mode: Initialized manualWidth/Height to ${manualWidth}x${manualHeight}`);
 } else {
     manualWidth = getIntParam('manualWidth', null);
+    setIntParam('manualWidth', manualWidth);
     manualHeight = getIntParam('manualHeight', null);
+    setIntParam('manualHeight', manualHeight);
 }
-
-
-const getUsername = () => getCookieValue(`broker_${appName}`)?.split('#')[0] || 'websocket_user'; // Default user for WS
 
 const enterFullscreen = () => {
   if ('webrtcInput' in window && window.webrtcInput && typeof window.webrtcInput.enterFullscreen === 'function') {
@@ -277,6 +326,31 @@ const roundDownToEven = (num) => {
   return Math.floor(num / 2) * 2;
 };
 
+const updateCanvasImageRendering = () => {
+  if (!canvas) return;
+  if (!antiAliasingEnabled) {
+    if (canvas.style.imageRendering !== 'pixelated') {
+      console.log("Anti-aliasing disabled by setting. Forcing 'pixelated' rendering.");
+      canvas.style.imageRendering = 'pixelated';
+      canvas.style.setProperty('image-rendering', 'crisp-edges', '');
+    }
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  if (window.isManualResolutionMode || (useCssScaling && dpr > 1)) {
+    if (canvas.style.imageRendering !== 'auto') {
+      console.log("Smoothing enabled for manual resolution or high-DPR scaling.");
+      canvas.style.imageRendering = 'auto';
+    }
+  } else {
+    if (canvas.style.imageRendering !== 'pixelated') {
+      console.log("Setting canvas rendering to 'pixelated' for 1:1 display.");
+      canvas.style.imageRendering = 'pixelated';
+      canvas.style.setProperty('image-rendering', 'crisp-edges', '');
+    }
+  }
+};
+
 const injectCSS = () => {
   const style = document.createElement('style');
   style.textContent = `
@@ -291,7 +365,7 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(var(--vh, 1vh) * 100);
   width: 100%;
 }
 .video-container {
@@ -397,8 +471,7 @@ function sendResolutionToServer(width, height) {
     console.log("Shared mode: Resolution sending to server is blocked.");
     return;
   }
-  const dpr = (window.isManualResolutionMode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
-  console.log(dpr, useCssScaling);
+  const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
   const realWidth = roundDownToEven(width * dpr);
   const realHeight = roundDownToEven(height * dpr);
   const resString = `${realWidth}x${realHeight}`;
@@ -462,6 +535,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos 0,0`);
   }
   canvas.style.display = 'block';
+  updateCanvasImageRendering();
 }
 
 function resetCanvasStyle(streamWidth, streamHeight) {
@@ -507,6 +581,7 @@ function resetCanvasStyle(streamWidth, streamHeight) {
 
   canvas.style.objectFit = 'fill';
   canvas.style.display = 'block'; // Ensure canvas is displayed
+  updateCanvasImageRendering();
 }
 
 function enableAutoResize() {
@@ -565,6 +640,8 @@ function updateUIForSharedMode() {
 
 const initializeUI = () => {
   injectCSS();
+  setRealViewportHeight();
+  window.addEventListener('resize', setRealViewportHeight);
   window.addEventListener('requestFileUpload', handleRequestFileUpload);
   const appDiv = document.getElementById('app');
   if (!appDiv) {
@@ -992,21 +1069,9 @@ const initializeInput = () => {
   if (overlayInput) {
     const handlePointerDown = (e) => {
       requestWakeLock();
-      if (e.pointerType === 'touch' && (e.width > 1 || e.height > 1)) {
-        overlayInput.style.cursor = 'none';
-      } else {
-        overlayInput.style.cursor = currentServerCursor;
-      }
-    };
-    const handlePointerMove = (e) => {
-      if (overlayInput.style.cursor !== currentServerCursor) {
-        overlayInput.style.cursor = currentServerCursor;
-      }
     };
     overlayInput.removeEventListener('pointerdown', handlePointerDown);
-    overlayInput.removeEventListener('pointermove', handlePointerMove);
     overlayInput.addEventListener('pointerdown', handlePointerDown);
-    overlayInput.addEventListener('pointermove', handlePointerMove);
     overlayInput.addEventListener('contextmenu', e => {
       e.preventDefault();
     });
@@ -1182,6 +1247,9 @@ function receiveMessage(event) {
     return;
   }
   switch (message.type) {
+    case 'sidebarVisibilityChanged':
+      isSidebarOpen = !!message.isOpen;
+      break;
     case 'setScaleLocally':
       if (isSharedMode) {
         console.log("Shared mode: setScaleLocally message ignored (forced true behavior).");
@@ -1197,6 +1265,11 @@ function receiveMessage(event) {
         }
       } else {
         console.warn("Invalid value received for setScaleLocally:", message.value);
+      }
+      break;
+    case 'setSynth':
+      if (window.webrtcInput && typeof window.webrtcInput.setSynth === 'function') {
+        window.webrtcInput.setSynth(message.value);
       }
       break;
     case 'showVirtualKeyboard':
@@ -1237,6 +1310,7 @@ function receiveMessage(event) {
           window.webrtcInput.updateCssScaling(useCssScaling);
         }
         if (changed) {
+          updateCanvasImageRendering();
           if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
             sendResolutionToServer(manualWidth, manualHeight);
             applyManualCanvasStyle(manualWidth, manualHeight, scaleLocallyManual);
@@ -1257,6 +1331,19 @@ function receiveMessage(event) {
         }
       } else {
         console.warn("Invalid value received for setUseCssScaling:", message.value);
+      }
+      break;
+    case 'setAntiAliasing':
+      if (typeof message.value === 'boolean') {
+        const changed = antiAliasingEnabled !== message.value;
+        antiAliasingEnabled = message.value;
+        setBoolParam('antiAliasingEnabled', antiAliasingEnabled);
+        console.log(`Set antiAliasingEnabled to ${antiAliasingEnabled} and persisted.`);
+        if (changed) {
+          updateCanvasImageRendering();
+        }
+      } else {
+        console.warn("Invalid value received for setAntiAliasing:", message.value);
       }
       break;
     case 'setManualResolution':
@@ -1715,9 +1802,129 @@ function handleSettingsMessage(settings) {
       console.log(`H.264 Streaming Mode setting received (${newStreamingModeValue}), but it's the same as current. No change.`);
     }
   }
+  if (settings.jpegQuality !== undefined) {
+    const newQuality = parseInt(settings.jpegQuality, 10);
+    if (jpegQuality !== newQuality) {
+      jpegQuality = newQuality;
+      setIntParam('jpegQuality', jpegQuality);
+      console.log(`Applied JPEG Quality setting: ${jpegQuality}.`);
+      if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN && currentEncoderMode === 'jpeg') {
+        const message = `SET_JPEG_QUALITY,${jpegQuality}`;
+        console.log(`Sent websocket message: ${message}`);
+        websocket.send(message);
+      } else if (!isSharedMode && currentEncoderMode !== 'jpeg') {
+        console.log("JPEG Quality setting changed, but current encoder is not 'jpeg'. WebSocket command not sent.");
+      } else if (!isSharedMode) {
+        console.warn("Websocket connection not open, cannot send JPEG Quality setting.");
+      }
+    } else {
+      console.log(`JPEG Quality setting received (${newQuality}), but it's the same as current. No change.`);
+    }
+  }
+  if (settings.paintOverJpegQuality !== undefined) {
+    const newQuality = parseInt(settings.paintOverJpegQuality, 10);
+    if (paintOverJpegQuality !== newQuality) {
+      paintOverJpegQuality = newQuality;
+      setIntParam('paintOverJpegQuality', paintOverJpegQuality);
+      console.log(`Applied Paint-Over JPEG Quality setting: ${paintOverJpegQuality}.`);
+      if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN && currentEncoderMode === 'jpeg') {
+        const message = `SET_PAINT_OVER_JPEG_QUALITY,${paintOverJpegQuality}`;
+        console.log(`Sent websocket message: ${message}`);
+        websocket.send(message);
+      } else if (!isSharedMode && currentEncoderMode !== 'jpeg') {
+        console.log("Paint-Over JPEG Quality setting changed, but current encoder is not 'jpeg'. WebSocket command not sent.");
+      } else if (!isSharedMode) {
+        console.warn("Websocket connection not open, cannot send Paint-Over JPEG Quality setting.");
+      }
+    } else {
+      console.log(`Paint-Over JPEG Quality setting received (${newQuality}), but it's the same as current. No change.`);
+    }
+  }
+  if (settings.useCpu !== undefined) {
+    const newUseCpu = !!settings.useCpu;
+    if (useCpu !== newUseCpu) {
+      useCpu = newUseCpu;
+      setBoolParam('useCpu', useCpu);
+      console.log(`Applied Use CPU setting: ${useCpu}.`);
+      const isPixelfluxH264 = currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped';
+      if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN && isPixelfluxH264) {
+        const message = `SET_USE_CPU,${useCpu}`;
+        console.log(`Sent websocket message: ${message}`);
+        websocket.send(message);
+      } else if (!isSharedMode && !isPixelfluxH264) {
+        console.log("Use CPU setting changed, but current encoder is not a Pixelflux H.264 encoder. WebSocket command not sent.");
+      } else if (!isSharedMode) {
+        console.warn("Websocket connection not open, cannot send Use CPU setting.");
+      }
+    } else {
+      console.log(`Use CPU setting received (${newUseCpu}), but it's the same as current. No change.`);
+    }
+  }
+  if (settings.h264_paintover_crf !== undefined) {
+    const newCrf = parseInt(settings.h264_paintover_crf, 10);
+    if (h264_paintover_crf !== newCrf) {
+      h264_paintover_crf = newCrf;
+      setIntParam('h264_paintover_crf', h264_paintover_crf);
+      console.log(`Applied H.264 Paint-Over CRF setting: ${h264_paintover_crf}.`);
+      const isPixelfluxH264 = currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped';
+      if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN && isPixelfluxH264) {
+        const message = `SET_H264_PAINTOVER_CRF,${h264_paintover_crf}`;
+        console.log(`Sent websocket message: ${message}`);
+        websocket.send(message);
+      } else if (!isSharedMode && !isPixelfluxH264) {
+        console.log("H.264 Paint-Over CRF setting changed, but current encoder is not a Pixelflux H.264 encoder. WebSocket command not sent.");
+      } else if (!isSharedMode) {
+        console.warn("Websocket connection not open, cannot send H.264 Paint-Over CRF setting.");
+      }
+    } else {
+      console.log(`H.264 Paint-Over CRF setting received (${newCrf}), but it's the same as current. No change.`);
+    }
+  }
+  if (settings.h264_paintover_burst_frames !== undefined) {
+    const newBurst = parseInt(settings.h264_paintover_burst_frames, 10);
+    if (h264_paintover_burst_frames !== newBurst) {
+      h264_paintover_burst_frames = newBurst;
+      setIntParam('h264_paintover_burst_frames', h264_paintover_burst_frames);
+      console.log(`Applied H.264 Paint-Over Burst Frames setting: ${h264_paintover_burst_frames}.`);
+      const isPixelfluxH264 = currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped';
+      if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN && isPixelfluxH264) {
+        const message = `SET_H264_PAINTOVER_BURST_FRAMES,${h264_paintover_burst_frames}`;
+        console.log(`Sent websocket message: ${message}`);
+        websocket.send(message);
+      } else if (!isSharedMode && !isPixelfluxH264) {
+        console.log("H.264 Paint-Over Burst Frames setting changed, but current encoder is not a Pixelflux H.264 encoder. WebSocket command not sent.");
+      } else if (!isSharedMode) {
+        console.warn("Websocket connection not open, cannot send H.264 Paint-Over Burst Frames setting.");
+      }
+    } else {
+      console.log(`H.264 Paint-Over Burst Frames setting received (${newBurst}), but it's the same as current. No change.`);
+    }
+  }
+  if (settings.use_paint_over_quality !== undefined) {
+    const newUsePaintOver = !!settings.use_paint_over_quality;
+    if (use_paint_over_quality !== newUsePaintOver) {
+      use_paint_over_quality = newUsePaintOver;
+      setBoolParam('use_paint_over_quality', use_paint_over_quality);
+      console.log(`Applied Use Paint-Over Quality setting: ${use_paint_over_quality}.`);
+      const isApplicableEncoder = currentEncoderMode === 'jpeg' || currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped';
+      if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN && isApplicableEncoder) {
+        const message = `SET_USE_PAINT_OVER_QUALITY,${use_paint_over_quality}`;
+        console.log(`Sent websocket message: ${message}`);
+        websocket.send(message);
+      } else if (!isSharedMode && !isApplicableEncoder) {
+        console.log("Use Paint-Over Quality setting changed, but current encoder is not applicable. WebSocket command not sent.");
+      } else if (!isSharedMode) {
+        console.warn("Websocket connection not open, cannot send Use Paint-Over Quality setting.");
+      }
+    } else {
+      console.log(`Use Paint-Over Quality setting received (${newUsePaintOver}), but it's the same as current. No change.`);
+    }
+  }
   if (settings.SCALING_DPI !== undefined) {
     const dpi = parseInt(settings.SCALING_DPI, 10);
     if (!isNaN(dpi)) {
+      scalingDPI = dpi;
+      setIntParam('SCALING_DPI', scalingDPI);
       console.log(`Applied SCALING_DPI setting: ${dpi}.`);
       if (!isSharedMode && websocket && websocket.readyState === WebSocket.OPEN) {
         const message = `s,${dpi}`;
@@ -1750,6 +1957,7 @@ function sendStatsMessage() {
     connection: connectionStat,
     gpu: gpuStat,
     cpu: cpuStat,
+    network: networkStat,
     clientFps: window.fps,
     audioBuffer: window.currentAudioBufferSize,
     videoBuffer: videoFrameBuffer.length,
@@ -1813,27 +2021,24 @@ document.addEventListener('DOMContentLoaded', () => {
       console.warn("VideoDecoder already exists, closing before re-initializing.");
       decoder.close();
     }
-    let targetWidth = 1280; // Logical default
-    let targetHeight = 720; // Logical default
-
+    let targetWidth = 1024;
+    let targetHeight = 768;
     if (isSharedMode) {
-        targetWidth = manualWidth > 0 ? manualWidth : 1280; // manualWidth is logical
-        targetHeight = manualHeight > 0 ? manualHeight : 720; // manualHeight is logical
-    } else if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) { // manualWidth/Height are logical
+        targetWidth = manualWidth > 0 ? manualWidth : 1024;
+        targetHeight = manualHeight > 0 ? manualHeight : 768;
+    } else if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
       targetWidth = manualWidth;
       targetHeight = manualHeight;
     } else if (window.webrtcInput && typeof window.webrtcInput.getWindowResolution === 'function') {
       try {
-        const currentRes = window.webrtcInput.getWindowResolution(); // Logical
+        const currentRes = window.webrtcInput.getWindowResolution();
         const autoWidth = roundDownToEven(currentRes[0]);
         const autoHeight = roundDownToEven(currentRes[1]);
         if (autoWidth > 0 && autoHeight > 0) {
           targetWidth = autoWidth;
           targetHeight = autoHeight;
         }
-      } catch (e) {
-        /* use defaults */
-      }
+      } catch (e) { /* use defaults */ }
     }
 
     const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
@@ -1842,23 +2047,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     decoder = new VideoDecoder({
       output: handleDecodedFrame,
-      error: (e) => {
-        console.error('VideoDecoder error:', e.message);
-        if (isSharedMode && (sharedClientState === 'configuring' || sharedClientState === 'ready' || sharedClientState === 'awaiting_identification')) {
-            if (decoder && e.target === decoder) {
-                 console.error(`Shared mode: Main VideoDecoder error in state ${sharedClientState}. Message: ${e.message}. Transitioning to error state.`);
-                 sharedClientState = 'error';
-            } else if (!decoder && identifiedEncoderModeForShared === 'h264_full_frame') {
-                 console.error(`Shared mode: Main VideoDecoder (expected for h264_full_frame) is null and an error occurred. State: ${sharedClientState}. Message: ${e.message}. Transitioning to error state.`);
-                 sharedClientState = 'error';
-            }
-        } else if (!isSharedMode) {
-            if (e.message.includes('fatal') || (decoder && (decoder.state === 'closed' || decoder.state === 'unconfigured'))) {
-              console.warn("Non-shared mode: Main VideoDecoder fatal error or closed/unconfigured. Attempting re-initialization.");
-              initializeDecoder();
-            }
-        }
-      },
+      error: (e) => initiateFallback(e, 'main_decoder'),
     });
     const decoderConfig = {
       codec: 'avc1.42E01E',
@@ -1868,22 +2057,20 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     try {
       const support = await VideoDecoder.isConfigSupported(decoderConfig);
-      if (support.supported) {
-        await decoder.configure(decoderConfig);
-        console.log('Main VideoDecoder configured successfully with config:', decoderConfig);
-        return true;
-      } else {
-        console.error('Main VideoDecoder configuration not supported:', support, decoderConfig);
-        decoder = null;
-        return false;
+      if (!support.supported) {
+        throw new Error(`Configuration not supported: ${JSON.stringify(decoderConfig)}`);
       }
+      await decoder.configure(decoderConfig);
+      console.log('Main VideoDecoder configured successfully with config:', decoderConfig);
+      return true;
     } catch (e) {
-      console.error('Error configuring Main VideoDecoder with config:', e, decoderConfig);
-      decoder = null;
+      initiateFallback(e, 'main_decoder_configure');
       return false;
     }
   }
-  initializeUI();
+  if (!runPreflightChecks()) {
+    return;
+  }
 
 
   const pathname = window.location.pathname.substring(
@@ -2112,9 +2299,12 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
             }
           }
         }
-        if (jpegPaintedThisFrame && !streamStarted) {
-          startStream();
-          if (!inputInitialized && !isSharedMode) initializeInput();
+        if (jpegPaintedThisFrame) {
+          frameCount++;
+          if (!streamStarted) {
+            startStream();
+            if (!inputInitialized && !isSharedMode) initializeInput();
+          }
         }
       }
     } else if ( (isSharedMode && currentEncoderMode === 'h264_full_frame' && sharedClientState === 'ready') ||
@@ -2160,72 +2350,83 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
     try {
       const audioWorkletProcessorCode = `
         class AudioFrameProcessor extends AudioWorkletProcessor {
-          constructor() {
-            super();
-            this.audioBufferQueue = [];
-            this.currentAudioData = null;
-            this.currentDataOffset = 0;
-            this.port.onmessage = (event) => {
-            if (event.data.audioData) {
-                const pcmData = new Float32Array(event.data.audioData);
-                this.audioBufferQueue.push(pcmData);
-              } else if (event.data.type === 'getBufferSize') {
-                this.port.postMessage({ type: 'audioBufferSize', size: this.audioBufferQueue.length });
-              }
-            };
-          }
+            constructor(options) {
+                super();
+                this.audioBufferQueue = [];
+                this.currentAudioData = null;
+                this.currentDataOffset = 0;
 
-          process(inputs, outputs, parameters) {
-            const output = outputs[0];
-            const leftChannel = output ? output[0] : undefined;
-            const rightChannel = output ? output[1] : undefined;
+                this.TARGET_BUFFER_PACKETS = 3;
+                this.MAX_BUFFER_PACKETS = 8;
 
-            if (!leftChannel || !rightChannel) {
-              if (leftChannel) leftChannel.fill(0);
-              if (rightChannel) rightChannel.fill(0);
-              return true;
+                this.port.onmessage = (event) => {
+                    if (event.data.audioData) {
+                        const pcmData = new Float32Array(event.data.audioData);
+                        if (this.audioBufferQueue.length >= this.MAX_BUFFER_PACKETS) {
+                            this.audioBufferQueue.shift();
+                        }
+                        this.audioBufferQueue.push(pcmData);
+                    } else if (event.data.type === 'getBufferSize') {
+                        const bufferMillis = this.audioBufferQueue.reduce((total, buf) => total + (buf.length / 2 / sampleRate) * 1000, 0);
+                        this.port.postMessage({
+                            type: 'audioBufferSize',
+                            size: this.audioBufferQueue.length,
+                            durationMs: bufferMillis
+                        });
+                    }
+                };
             }
 
-            const samplesPerBuffer = leftChannel.length;
-            if (this.audioBufferQueue.length === 0 && this.currentAudioData === null) {
-              leftChannel.fill(0);
-              rightChannel.fill(0);
-              return true;
-            }
+            process(inputs, outputs, parameters) {
+                const output = outputs[0];
+                const leftChannel = output ? output[0] : undefined;
 
-            let data = this.currentAudioData;
-            let offset = this.currentDataOffset;
-
-            for (let sampleIndex = 0; sampleIndex < samplesPerBuffer; sampleIndex++) {
-              if (!data || offset >= data.length) {
-                if (this.audioBufferQueue.length > 0) {
-                  data = this.currentAudioData = this.audioBufferQueue.shift();
-                  offset = this.currentDataOffset = 0;
-                } else {
-                  this.currentAudioData = null;
-                  this.currentDataOffset = 0;
-                  leftChannel.fill(0, sampleIndex);
-                  rightChannel.fill(0, sampleIndex);
-                  return true;
+                if (!leftChannel) {
+                    return true;
                 }
-              }
-              leftChannel[sampleIndex] = data[offset++];
-              if (offset < data.length) {
-                rightChannel[sampleIndex] = data[offset++];
-              } else {
-                 rightChannel[sampleIndex] = leftChannel[sampleIndex];
-                 offset++;
-              }
+                
+                const rightChannel = output ? output[1] : leftChannel;
+                const samplesPerBuffer = leftChannel.length;
+
+                if (this.audioBufferQueue.length === 0 && this.currentAudioData === null) {
+                    leftChannel.fill(0);
+                    rightChannel.fill(0);
+                    return true;
+                }
+
+                let data = this.currentAudioData;
+                let offset = this.currentDataOffset;
+
+                for (let sampleIndex = 0; sampleIndex < samplesPerBuffer; sampleIndex++) {
+                    if (!data || offset >= data.length) {
+                        if (this.audioBufferQueue.length > 0) {
+                            data = this.currentAudioData = this.audioBufferQueue.shift();
+                            offset = this.currentDataOffset = 0;
+                        } else {
+                            this.currentAudioData = null;
+                            this.currentDataOffset = 0;
+                            leftChannel.fill(0, sampleIndex);
+                            rightChannel.fill(0, sampleIndex);
+                            return true;
+                        }
+                    }
+                    
+                    leftChannel[sampleIndex] = data[offset++];
+                    if (offset < data.length) {
+                        rightChannel[sampleIndex] = data[offset++];
+                    } else {
+                        rightChannel[sampleIndex] = leftChannel[sampleIndex];
+                    }
+                }
+
+                this.currentDataOffset = offset;
+                if (data && offset >= data.length) {
+                    this.currentAudioData = null;
+                    this.currentDataOffset = 0;
+                }
+
+                return true;
             }
-            this.currentDataOffset = offset;
-            if (offset >= data.length) {
-                 this.currentAudioData = null;
-                 this.currentDataOffset = 0;
-            } else {
-                 this.currentAudioData = data;
-            }
-            return true;
-          }
         }
         registerProcessor('audio-frame-processor', AudioFrameProcessor);
       `;
@@ -2242,7 +2443,8 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
       audioWorkletProcessorPort = audioWorkletNode.port;
       audioWorkletProcessorPort.onmessage = (event) => {
         if (event.data.type === 'audioBufferSize') {
-          window.currentAudioBufferSize = event.data.size;
+            window.currentAudioBufferSize = event.data.size;
+            window.currentAudioBufferDuration = event.data.durationMs;
         }
       };
       audioWorkletNode.connect(audioContext.destination);
@@ -2336,51 +2538,56 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
   websocket = new WebSocket(websocketEndpointURL.href);
   websocket.binaryType = 'arraybuffer';
 
-  const sendClientMetrics = () => {
-    if (isSharedMode) return; // Shared mode does not have client-side FPS display in this context
-
-    const now = performance.now();
-    const elapsedStriped = now - lastStripedFpsUpdateTime;
-    const elapsedFullFrame = now - lastFpsUpdateTime;
-    const fpsUpdateInterval = 1000; // ms
-
-    if (uniqueStripedFrameIdsThisPeriod.size > 0) {
-      if (elapsedStriped >= fpsUpdateInterval) {
-        const stripedFps = (uniqueStripedFrameIdsThisPeriod.size * 1000) / elapsedStriped;
-        window.fps = Math.round(stripedFps);
-        uniqueStripedFrameIdsThisPeriod.clear();
-        lastStripedFpsUpdateTime = now;
-        frameCount = 0; // Reset full frame count as striped is primary
-        lastFpsUpdateTime = now; // Also reset its timer
-      }
-    } else if (frameCount > 0) {
-      if (elapsedFullFrame >= fpsUpdateInterval) {
-        const fullFrameFps = (frameCount * 1000) / elapsedFullFrame;
-        window.fps = Math.round(fullFrameFps);
-        frameCount = 0;
-        lastFpsUpdateTime = now;
-        lastStripedFpsUpdateTime = now; // Reset its timer too
-      }
-    } else {
-      if (elapsedStriped >= fpsUpdateInterval || elapsedFullFrame >= fpsUpdateInterval) {
-           window.fps = 0;
-           lastFpsUpdateTime = now;
-           lastStripedFpsUpdateTime = now;
-      }
-    }
-
+  const sendBackpressureAck = () => {
     if (websocket && websocket.readyState === WebSocket.OPEN) {
-      if (audioWorkletProcessorPort) {
-        audioWorkletProcessorPort.postMessage({
-          type: 'getBufferSize'
-        });
-      }
       try {
         if (lastReceivedVideoFrameId !== -1) {
           websocket.send(`CLIENT_FRAME_ACK ${lastReceivedVideoFrameId}`);
         }
       } catch (error) {
-        console.error('[websockets] Error sending client metrics (ACK):', error);
+        console.error('[Backpressure] Error sending frame ACK:', error);
+      }
+    }
+  };
+
+  const sendClientMetrics = () => {
+    if (isSharedMode) return; // Shared mode does not have client-side FPS display in this context
+
+    if (isSidebarOpen) {
+      const now = performance.now();
+      const elapsedStriped = now - lastStripedFpsUpdateTime;
+      const elapsedFullFrame = now - lastFpsUpdateTime;
+      const fpsUpdateInterval = 1000; // ms
+
+      if (uniqueStripedFrameIdsThisPeriod.size > 0) {
+        if (elapsedStriped >= fpsUpdateInterval) {
+          const stripedFps = (uniqueStripedFrameIdsThisPeriod.size * 1000) / elapsedStriped;
+          window.fps = Math.round(stripedFps);
+          uniqueStripedFrameIdsThisPeriod.clear();
+          lastStripedFpsUpdateTime = now;
+          frameCount = 0; // Reset full frame count as striped is primary
+          lastFpsUpdateTime = now; // Also reset its timer
+        }
+      } else if (frameCount > 0) {
+        if (elapsedFullFrame >= fpsUpdateInterval) {
+          const fullFrameFps = (frameCount * 1000) / elapsedFullFrame;
+          window.fps = Math.round(fullFrameFps);
+          frameCount = 0;
+          lastFpsUpdateTime = now;
+          lastStripedFpsUpdateTime = now; // Reset its timer too
+        }
+      } else {
+        if (elapsedStriped >= fpsUpdateInterval || elapsedFullFrame >= fpsUpdateInterval) {
+             window.fps = 0;
+             lastFpsUpdateTime = now;
+             lastStripedFpsUpdateTime = now;
+        }
+      }
+
+      if (audioWorkletProcessorPort) {
+        audioWorkletProcessorPort.postMessage({
+          type: 'getBufferSize'
+        });
       }
     }
   };
@@ -2392,39 +2599,61 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
     updateStatusDisplay();
     window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
     if (!isSharedMode) {
-      const settingsPrefix = `${appName}_`;
+      const settingsPrefix = `${storageAppName}_`;
       const settingsToSend = {};
       let foundSettings = false;
-      let initialClientWidthForSettings, initialClientHeightForSettings; // These will be logical
-      const dpr = window.devicePixelRatio || 1;
+      let initialClientWidthForSettings, initialClientHeightForSettings;
+      const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 
       for (const key in localStorage) {
         if (Object.hasOwnProperty.call(localStorage, key) && key.startsWith(settingsPrefix)) {
           const unprefixedKey = key.substring(settingsPrefix.length);
           let serverExpectedKey = null;
-          // Map localStorage keys to server-expected keys
           if (unprefixedKey === 'videoBitRate') serverExpectedKey = 'webrtc_videoBitRate';
           else if (unprefixedKey === 'videoFramerate') serverExpectedKey = 'webrtc_videoFramerate';
           else if (unprefixedKey === 'videoCRF') serverExpectedKey = 'webrtc_videoCRF';
           else if (unprefixedKey === 'encoder') serverExpectedKey = 'webrtc_encoder';
           else if (unprefixedKey === 'resizeRemote') serverExpectedKey = 'webrtc_resizeRemote';
           else if (unprefixedKey === 'isManualResolutionMode') serverExpectedKey = 'webrtc_isManualResolutionMode';
-          // For manualWidth/Height, we'll handle them specially below to apply DPR
           else if (unprefixedKey === 'audioBitRate') serverExpectedKey = 'webrtc_audioBitRate';
           else if (unprefixedKey === 'videoBufferSize') serverExpectedKey = 'webrtc_videoBufferSize';
           else if (unprefixedKey === 'h264_fullcolor') serverExpectedKey = 'webrtc_h264_fullcolor';
           else if (unprefixedKey === 'h264_streaming_mode') serverExpectedKey = 'webrtc_h264_streaming_mode';
+          else if (unprefixedKey === 'jpegQuality') serverExpectedKey = 'pixelflux_jpeg_quality';
+          else if (unprefixedKey === 'paintOverJpegQuality') serverExpectedKey = 'pixelflux_paint_over_jpeg_quality';
+          else if (unprefixedKey === 'useCpu') serverExpectedKey = 'pixelflux_use_cpu';
+          else if (unprefixedKey === 'h264_paintover_crf') serverExpectedKey = 'pixelflux_h264_paintover_crf';
+          else if (unprefixedKey === 'h264_paintover_burst_frames') serverExpectedKey = 'pixelflux_h264_paintover_burst_frames';
+          else if (unprefixedKey === 'use_paint_over_quality') serverExpectedKey = 'pixelflux_use_paint_over_quality';
+          else if (unprefixedKey === 'SCALING_DPI') serverExpectedKey = 'webrtc_SCALING_DPI';
 
           if (serverExpectedKey) {
             let value = localStorage.getItem(key);
-            // Type conversions for specific settings
-            if (serverExpectedKey === 'webrtc_resizeRemote' || serverExpectedKey === 'webrtc_isManualResolutionMode' || serverExpectedKey === 'webrtc_h264_fullcolor' || serverExpectedKey === 'webrtc_h264_streaming_mode') {
+            const booleanSettingKeys = [
+              'webrtc_resizeRemote',
+              'webrtc_isManualResolutionMode',
+              'webrtc_h264_fullcolor',
+              'webrtc_h264_streaming_mode',
+              'pixelflux_use_cpu',
+              'pixelflux_use_paint_over_quality',
+            ];
+            const integerSettingKeys = [
+              'webrtc_videoBitRate',
+              'webrtc_videoFramerate',
+              'webrtc_videoCRF',
+              'webrtc_audioBitRate',
+              'webrtc_videoBufferSize',
+              'pixelflux_jpeg_quality',
+              'pixelflux_paint_over_jpeg_quality',
+              'pixelflux_h264_paintover_crf',
+              'pixelflux_h264_paintover_burst_frames',
+              'webrtc_SCALING_DPI',
+            ];
+            if (booleanSettingKeys.includes(serverExpectedKey)) {
               value = (value === 'true');
-            } else if (['webrtc_videoBitRate', 'webrtc_videoFramerate', 'webrtc_videoCRF',
-                'webrtc_audioBitRate', 'webrtc_videoBufferSize'
-              ].includes(serverExpectedKey)) {
+            } else if (integerSettingKeys.includes(serverExpectedKey)) {
               value = parseInt(value, 10);
-              if (isNaN(value)) value = localStorage.getItem(key); // Revert if NaN
+              if (isNaN(value)) value = localStorage.getItem(key);
             }
             settingsToSend[serverExpectedKey] = value;
             foundSettings = true;
@@ -2432,26 +2661,24 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
         }
       }
 
-      if (isManualResolutionMode && manualWidth != null && manualHeight != null) { // manualWidth/Height are logical
-        settingsToSend['webrtc_isManualResolutionMode'] = true; // Ensure this is set
-        settingsToSend['webrtc_manualWidth'] = roundDownToEven(manualWidth * dpr); // Send physical
-        settingsToSend['webrtc_manualHeight'] = roundDownToEven(manualHeight * dpr); // Send physical
+      if (isManualResolutionMode && manualWidth != null && manualHeight != null) {
+        settingsToSend['webrtc_isManualResolutionMode'] = true;
+        settingsToSend['webrtc_manualWidth'] = roundDownToEven(manualWidth * dpr);
+        settingsToSend['webrtc_manualHeight'] = roundDownToEven(manualHeight * dpr);
       } else {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : {
-          width: window.innerWidth, // Logical
-          height: window.innerHeight // Logical
+          width: window.innerWidth,
+          height: window.innerHeight
         };
-        initialClientWidthForSettings = rect.width; // Store logical temporarily
-        initialClientHeightForSettings = rect.height; // Store logical temporarily
+        initialClientWidthForSettings = rect.width;
+        initialClientHeightForSettings = rect.height;
 
-        settingsToSend['webrtc_isManualResolutionMode'] = false; // Ensure this is set
-        settingsToSend['webrtc_initialClientWidth'] = roundDownToEven(initialClientWidthForSettings * dpr); // Send physical
-        settingsToSend['webrtc_initialClientHeight'] = roundDownToEven(initialClientHeightForSettings * dpr); // Send physical
+        settingsToSend['webrtc_isManualResolutionMode'] = false;
+        settingsToSend['webrtc_initialClientWidth'] = roundDownToEven(initialClientWidthForSettings * dpr);
+        settingsToSend['webrtc_initialClientHeight'] = roundDownToEven(initialClientHeightForSettings * dpr);
       }
 
-      // Ensure manualWidth/Height from localStorage are also DPR adjusted if isManualResolutionMode is true
-      // This covers the case where isManualResolutionMode is true from localStorage but manualWidth/Height were not set above
       if (settingsToSend['webrtc_isManualResolutionMode'] === true) {
           const storedManualWidth = getIntParam('manualWidth', null);
           const storedManualHeight = getIntParam('manualHeight', null);
@@ -2467,17 +2694,13 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
         const message = `SETTINGS,${settingsJson}`;
         websocket.send(message);
         console.log('[websockets] Sent initial settings (resolutions are physical) to server:', settingsToSend);
-        window.postMessage({
-          type: 'initialClientSettings',
-          settings: settingsToSend // UI might want to know what was sent
-        }, window.location.origin);
       } catch (e) {
         console.error('[websockets] Error constructing or sending initial settings:', e);
       }
 
       const isCurrentModePixelfluxH264_ws = currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped';
       const isCurrentModeJpeg_ws = currentEncoderMode === 'jpeg';
-      const isCurrentModeGStreamerPipeline_ws = !isCurrentModePixelfluxH264_ws && !isCurrentModeJpeg_ws; // GStreamer H.264
+      const isCurrentModeGStreamerPipeline_ws = !isCurrentModePixelfluxH264_ws && !isCurrentModeJpeg_ws;
 
       if (isCurrentModeGStreamerPipeline_ws) {
         if (websocket && websocket.readyState === WebSocket.OPEN) {
@@ -2507,6 +2730,10 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
         if (metricsIntervalId === null) {
           metricsIntervalId = setInterval(sendClientMetrics, METRICS_INTERVAL_MS);
           console.log(`[websockets] Started sending client metrics every ${METRICS_INTERVAL_MS}ms.`);
+        }
+        if (backpressureIntervalId === null) {
+          backpressureIntervalId = setInterval(sendBackpressureAck, BACKPRESSURE_INTERVAL_MS);
+          console.log(`[websockets] Started sending backpressure ACKs every ${BACKPRESSURE_INTERVAL_MS}ms.`);
         }
     }
   };
@@ -2575,7 +2802,6 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
                     sharedClientState = 'ready';
                     console.log(`Shared mode: Client is now ready to process video of type '${identifiedEncoderModeForShared}'.`);
                 }
-                return;
             } else if (dataTypeByte !== 1) { // Ignore audio packets during identification
                 console.warn(`Shared mode (awaiting_identification): Received non-identifying binary packet type 0x${dataTypeByte.toString(16)}. Still waiting for a video packet.`);
                 return;
@@ -2616,6 +2842,15 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
           (!isSharedMode && isVideoPipelineActive && currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'x264enc' && currentEncoderMode !== 'x264enc-striped');
 
         if (canProcessFullH264) {
+          if (isSharedMode && !sharedClientHasReceivedKeyframe) {
+            if (frameTypeFlag === 1) {
+              console.log("Shared mode: First keyframe received. Opening the gate for video decoding.");
+              sharedClientHasReceivedKeyframe = true;
+            } else {
+              console.log("Shared mode: Gate is closed. Discarding non-keyframe packet.");
+              return;
+            }
+          }
           if (decoder && decoder.state === 'configured') {
             const chunk = new EncodedVideoChunk({
               type: frameTypeFlag === 1 ? 'key' : 'delta',
@@ -2625,14 +2860,7 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
             try {
               decoder.decode(chunk);
             } catch (e) {
-              console.error('Video Decoding error (Full H.264):', e.message, e);
-              if (!isSharedMode && (decoder.state === 'closed' || decoder.state === 'unconfigured')) {
-                console.warn("Re-initializing main decoder due to error.");
-                initializeDecoder(); // Uses logical dimensions, applies DPR
-              } else if (isSharedMode && (decoder.state === 'closed' || decoder.state === 'unconfigured')) {
-                console.error("Shared mode: Main H.264 decoder error after configuration. Entering error state.");
-                sharedClientState = 'error';
-              }
+              initiateFallback(e, 'main_decoder_decode');
             }
           } else {
             if (!isSharedMode && (!decoder || decoder.state === 'closed' || decoder.state === 'unconfigured')) {
@@ -2726,6 +2954,15 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
             (!isSharedMode && isVideoPipelineActive && (currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped'));
 
         if (canProcessVncStripe) {
+            if (isSharedMode && !sharedClientHasReceivedKeyframe) {
+                if (video_frame_type_byte === 0x01) {
+                    console.log("Shared mode: First keyframe received for striped video. Opening the gate.");
+                    sharedClientHasReceivedKeyframe = true;
+                } else {
+                    console.log("Shared mode: Gate is closed. Discarding non-keyframe striped packet.");
+                    return;
+                }
+            }
             if (h264Payload.byteLength === 0) return;
 
             let decoderInfo = vncStripeDecoders[vncStripeYStart];
@@ -2739,7 +2976,7 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
 
                 const newStripeDecoder = new VideoDecoder({
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart, vncFrameID),
-                    error: (e) => console.error(`Error in VideoDecoder for VNC stripe Y=${vncStripeYStart} (FrameID: ${vncFrameID}):`, e.message)
+                    error: (e) => initiateFallback(e, `stripe_decoder_Y=${vncStripeYStart}`)
                 });
                 const decoderConfig = { // Configured with physical dimensions
                     codec: 'avc1.42E01E',
@@ -2789,7 +3026,7 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
                     try {
                         decoderInfo.decoder.decode(chunk);
                     } catch (e) {
-                        console.error(`Error decoding VNC stripe chunk Y=${vncStripeYStart}:`, e.message, e);
+                        initiateFallback(e, `stripe_decode_Y=${vncStripeYStart}`);
                     }
                 } else if (decoderInfo.decoder.state === "unconfigured" || decoderInfo.decoder.state === "configuring") {
                     decoderInfo.pendingChunks.push(chunkData);
@@ -2884,6 +3121,7 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
           }
           if (obj.type === 'system_stats') window.system_stats = obj;
           else if (obj.type === 'gpu_stats') window.gpu_stats = obj;
+          else if (obj.type === 'network_stats') window.network_stats = obj;
           else if (obj.type === 'server_settings') window.postMessage({
             type: 'serverSettings',
             encoders: obj.encoders
@@ -2968,19 +3206,8 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
         } else if (event.data.startsWith('cursor,')) {
           try {
             const cursorData = JSON.parse(event.data.substring(7));
-            if (parseInt(cursorData.handle, 10) === 0) {
-              currentServerCursor = 'auto';
-            } else {
-              let cursorStyle = `url('data:image/png;base64,${cursorData.curdata}')`;
-              if (cursorData.hotspot) {
-                cursorStyle += ` ${cursorData.hotspot.x} ${cursorData.hotspot.y}, auto`;
-              } else {
-                cursorStyle += ', auto';
-              }
-              currentServerCursor = cursorStyle;
-            }
-            if (overlayInput && overlayInput.style.cursor !== 'none') {
-              overlayInput.style.cursor = currentServerCursor;
+            if (window.webrtcInput && typeof window.webrtcInput.updateServerCursor === 'function') {
+                window.webrtcInput.updateServerCursor(cursorData);
             }
           } catch (e) {
             console.error('Error parsing cursor data:', e);
@@ -3064,6 +3291,10 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
       clearInterval(metricsIntervalId);
       metricsIntervalId = null;
     }
+    if (backpressureIntervalId) {
+      clearInterval(backpressureIntervalId);
+      backpressureIntervalId = null;
+    }
     releaseWakeLock();
     if (isSharedMode) {
         console.error("Shared mode: WebSocket error. Resetting shared state to 'error'.");
@@ -3081,6 +3312,10 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
     if (metricsIntervalId) {
       clearInterval(metricsIntervalId);
       metricsIntervalId = null;
+    }
+    if (backpressureIntervalId) {
+      clearInterval(backpressureIntervalId);
+      backpressureIntervalId = null;
     }
     releaseWakeLock();
     cleanupVideoBuffer();
@@ -3397,6 +3632,10 @@ function cleanup() {
     clearInterval(metricsIntervalId);
     metricsIntervalId = null;
   }
+  if (backpressureIntervalId) {
+    clearInterval(backpressureIntervalId);
+    backpressureIntervalId = null;
+  }
   releaseWakeLock();
   if (window.isCleaningUp) return;
   window.isCleaningUp = true;
@@ -3591,6 +3830,7 @@ function uploadFileObject(file, pathToSend) {
     }, window.location.origin);
     websocket.send(`FILE_UPLOAD_START:${pathToSend}:${file.size}`);
     let offset = 0;
+    fileUploadProgressLastSent[pathToSend] = 0;
     const reader = new FileReader();
     reader.onload = function(e) {
       if (!websocket || websocket.readyState !== WebSocket.OPEN) {
@@ -3613,17 +3853,26 @@ function uploadFileObject(file, pathToSend) {
         websocket.send(prefixedView.buffer);
         offset += e.target.result.byteLength;
         const progress = file.size > 0 ? Math.round((offset / file.size) * 100) : 100;
-        window.postMessage({
-          type: 'fileUpload',
-          payload: {
-            status: 'progress',
-            fileName: pathToSend,
-            progress: progress,
-            fileSize: file.size
-          }
-        }, window.location.origin);
-        if (offset < file.size) readChunk(offset);
-        else {
+        const now = Date.now();
+        if (now - fileUploadProgressLastSent[pathToSend] > FILE_UPLOAD_THROTTLE_MS) {
+          window.postMessage({
+            type: 'fileUpload',
+            payload: {
+              status: 'progress',
+              fileName: pathToSend,
+              progress: progress,
+              fileSize: file.size
+            }
+          }, window.location.origin);
+          fileUploadProgressLastSent[pathToSend] = now;
+        }
+        if (offset < file.size) {
+          setTimeout(() => readChunk(offset), 0);
+        } else {
+          window.postMessage({
+            type: 'fileUpload',
+            payload: { status: 'progress', fileName: pathToSend, progress: 100, fileSize: file.size }
+          }, window.location.origin);
           websocket.send(`FILE_UPLOAD_END:${pathToSend}`);
           window.postMessage({
             type: 'fileUpload',
@@ -3666,6 +3915,11 @@ function uploadFileObject(file, pathToSend) {
 function performServerInitiatedVideoReset(reason = "unknown") {
   console.log(`Performing server-initiated video reset. Reason: ${reason}. Current lastReceivedVideoFrameId before reset: ${lastReceivedVideoFrameId}`);
 
+  if (isSharedMode) {
+    sharedClientHasReceivedKeyframe = false;
+    console.log("  Shared mode reset: Gate closed. Waiting for a new keyframe.");
+  }
+
   lastReceivedVideoFrameId = -1;
   console.log(`  Reset lastReceivedVideoFrameId to ${lastReceivedVideoFrameId}.`);
 
@@ -3698,12 +3952,76 @@ function performServerInitiatedVideoReset(reason = "unknown") {
     if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'x264enc' && currentEncoderMode !== 'x264enc-striped') {
       console.log("  Ensuring main video decoder is re-initialized after server reset.");
       if (isVideoPipelineActive) {
-         triggerInitializeDecoder(); // Uses logical dimensions, applies DPR
+         triggerInitializeDecoder();
       } else {
         console.log("  isVideoPipelineActive is false, decoder re-initialization deferred until video is enabled by user.");
       }
     }
   }
+}
+
+function initiateFallback(error, context) {
+    console.error(`FATAL DECODER ERROR (Context: ${context}).`, error);
+    if (window.isFallingBack) return;
+    window.isFallingBack = true;
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.onclose = null;
+        websocket.close();
+    }
+    if (metricsIntervalId) {
+      clearInterval(metricsIntervalId);
+      metricsIntervalId = null;
+    }
+    if (isSharedMode) {
+        console.log("Shared client fallback: Reloading page to re-sync with the stream.");
+        if (statusDisplayElement) {
+            statusDisplayElement.textContent = 'A video error occurred. Reloading to re-sync with the stream...';
+            statusDisplayElement.classList.remove('hidden');
+        }
+    } else {
+        console.log("Primary client fallback: Forcing client settings to safe defaults.");
+        setStringParam('encoder', 'x264enc');
+        setBoolParam('h264_fullcolor', false);
+        setIntParam('videoFramerate', 60);
+        setIntParam('videoCRF', 25);
+        setBoolParam('isManualResolutionMode', false);
+        setIntParam('manualWidth', null);
+        setIntParam('manualHeight', null);
+        
+        if (statusDisplayElement) {
+            statusDisplayElement.textContent = 'A critical video error occurred. Resetting to default settings and reloading...';
+            statusDisplayElement.classList.remove('hidden');
+        }
+    }
+    setTimeout(() => {
+        window.location.reload();
+    }, 3000);
+}
+
+function runPreflightChecks() {
+    initializeUI();
+    if (!window.isSecureContext) {
+        console.error("FATAL: Not in a secure context. WebCodecs require HTTPS.");
+        if (statusDisplayElement) {
+            statusDisplayElement.textContent = 'Error: This application requires a secure connection (HTTPS). Please check the URL.';
+            statusDisplayElement.classList.remove('hidden');
+        }
+        if (playButtonElement) playButtonElement.classList.add('hidden');
+        return false;
+    }
+
+    if (typeof window.VideoDecoder === 'undefined') {
+        console.error("FATAL: Browser does not support the VideoDecoder API.");
+        if (statusDisplayElement) {
+            statusDisplayElement.textContent = 'Error: Your browser does not support the WebCodecs API required for video streaming.';
+            statusDisplayElement.classList.remove('hidden');
+        }
+        if (playButtonElement) playButtonElement.classList.add('hidden');
+        return false;
+    }
+
+    console.log("Pre-flight checks passed: Secure context and VideoDecoder API are available.");
+    return true;
 }
 
 window.addEventListener('beforeunload', cleanup);

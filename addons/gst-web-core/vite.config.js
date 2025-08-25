@@ -14,6 +14,7 @@ export default defineConfig({
     ViteRestart({restart: ['selkies-core.js', 'lib/**','selkies-version.txt']}),
   ],
   build: {
+    target: 'chrome94',
     rollupOptions: {
       input: {
         main: './index.html',

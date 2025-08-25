@@ -1111,8 +1111,24 @@ export class Input {
     constructor(element, send, isSharedMode = false, playerIndex = 0,  useCssScaling = false) {
         this.element = element;
         this.send = send;
+        this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
         this.playerIndex = playerIndex;
+        this.cursorDiv = document.createElement('canvas');
+        this.cursorDiv.style.position = 'fixed';
+        this.cursorDiv.style.pointerEvents = 'none';
+        this.cursorDiv.style.zIndex = '999999';
+        this.cursorDiv.style.display = 'none';
+        this.cursorDiv.style.left = '0px';
+        this.cursorDiv.style.top = '0px';
+        this.cursorImg = this.cursorDiv.getContext('2d');
+        document.body.appendChild(this.cursorDiv);
+        this.cursorHotspot = { x: 0, y: 0 };
+        this._cursorImageBitmap = null;
+        this._rawHotspotX = 0;
+        this._rawHotspotY = 0;
+        this._latestMouseX = 0;
+        this._latestMouseY = 0;
         this.useCssScaling = useCssScaling;
         this.mouseRelative = false;
         this.m = null;
@@ -1141,7 +1157,9 @@ export class Input {
         this._altGrArmed = false;
         this._altGrTimeout = null;
         this._altGrCtrlTime = 0;
+        this._macCmdSwapped = false;
 
+        this._isSynth = false;
         this.isComposing = false;
         this.compositionString = "";
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
@@ -1165,13 +1183,74 @@ export class Input {
         this._touchScrollLastCentroid = null;
     }
 
+    _handleVisibilityMessage(event) {
+        if (event.origin !== window.location.origin) return;
+        const message = event.data;
+        if (typeof message === "object" && message !== null && message.type === 'sidebarVisibilityChanged') {
+            this._isSidebarOpen = !!message.isOpen;
+        }
+    }
+
     static _nextGuacID = 0;
+
+    _drawAndScaleCursor() {
+        if (!this._cursorImageBitmap) {
+            return;
+        }
+        const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
+        const img = this._cursorImageBitmap;
+        this.cursorDiv.width = img.width;
+        this.cursorDiv.height = img.height;
+        this.cursorDiv.style.width = `${img.width / dpr}px`;
+        this.cursorDiv.style.height = `${img.height / dpr}px`;
+        this.cursorImg.clearRect(0, 0, img.width, img.height);
+        this.cursorImg.drawImage(img, 0, 0);
+        this.cursorHotspot.x = this._rawHotspotX / dpr;
+        this.cursorHotspot.y = this._rawHotspotY / dpr;
+        this._updateCursorPosition(this._latestMouseX, this._latestMouseY);
+    }
+
+    _handleOutsideClick(event) {
+        if (!this.element.contains(event.target)) {
+            this.cursorDiv.style.display = 'none';
+        }
+    }
+    _updateCursorPosition(clientX, clientY) {
+        if (this.cursorDiv.style.display !== 'none') {
+            const newX = clientX - this.cursorHotspot.x;
+            const newY = clientY - this.cursorHotspot.y;
+            this.cursorDiv.style.transform = `translate(${newX}px, ${newY}px)`;
+        }
+    }
+
+    async updateServerCursor(cursorData) {
+        if (!cursorData.curdata ||
+            parseInt(cursorData.handle, 10) === 0 ||
+            this._trackpadMode)
+        {
+            this.cursorDiv.style.display = 'none';
+            this._cursorImageBitmap = null;
+            return;
+        }
+        this._rawHotspotX = parseInt(cursorData.hotx) || 0;
+        this._rawHotspotY = parseInt(cursorData.hoty) || 0;
+        const blob = await (await fetch(`data:image/png;base64,${cursorData.curdata}`)).blob();
+        this._cursorImageBitmap = await createImageBitmap(blob);
+        this.cursorDiv.style.display = 'block';
+        this._drawAndScaleCursor();
+    }
+
+    setSynth(isSynth) {
+        console.log(`Input: Synthetic mode ${isSynth ? 'enabled' : 'disabled'}.`);
+        this._isSynth = isSynth;
+    }
 
     updateCssScaling(newUseCssScalingValue) {
         if (this.useCssScaling !== newUseCssScalingValue) {
             console.log(`Input: Updating useCssScaling from ${this.useCssScaling} to ${newUseCssScalingValue}`);
             this.useCssScaling = newUseCssScalingValue;
-            this._windowMath(); // Recalculate mouse coordinate scaling factors
+            this._windowMath();
+            this._drawAndScaleCursor();
         }
     }
 
@@ -1219,19 +1298,21 @@ export class Input {
             return;
         }
 
-        for (const code in this._keyDownList) {
-            const keysym = this._keyDownList[code];
-            if ((code === 'ControlLeft' || code === 'ControlRight') && !event.ctrlKey) {
-                this._sendKeyEvent(keysym, code, false);
-            }
-            if ((code === 'MetaLeft' || code === 'MetaRight') && !event.metaKey) {
-                this._sendKeyEvent(keysym, code, false);
-            }
-            if ((code === 'AltLeft' || code === 'AltRight') && !event.altKey) {
-                this._sendKeyEvent(keysym, code, false);
-            }
-            if ((code === 'ShiftLeft' || code === 'ShiftRight') && !event.shiftKey) {
-                this._sendKeyEvent(keysym, code, false);
+        if (!this._isSynth) {
+            for (const code in this._keyDownList) {
+                const keysym = this._keyDownList[code];
+                if ((code === 'ControlLeft' || code === 'ControlRight') && !event.ctrlKey) {
+                    this._sendKeyEvent(keysym, code, false);
+                }
+                if ((code === 'MetaLeft' || code === 'MetaRight') && !event.metaKey) {
+                    this._sendKeyEvent(keysym, code, false);
+                }
+                if ((code === 'AltLeft' || code === 'AltRight') && !event.altKey) {
+                    this._sendKeyEvent(keysym, code, false);
+                }
+                if ((code === 'ShiftLeft' || code === 'ShiftRight') && !event.shiftKey) {
+                    this._sendKeyEvent(keysym, code, false);
+                }
             }
         }
 
@@ -1272,15 +1353,17 @@ export class Input {
 
         if (browser.isMac() && code !== "MetaLeft" && code !== "MetaRight" &&
             event.metaKey && !event.ctrlKey && !event.altKey) {
-            if (this._keyDownList["MetaLeft"]) {
-                this._sendKeyEvent(this._keyDownList["MetaLeft"], "MetaLeft", false);
-                delete this._keyDownList["MetaLeft"];
+            if (this._keyDownList["MetaLeft"] || this._keyDownList["MetaRight"]) {
+                console.log(`macOS: Cmd+key detected for code '${code}'. Remapping Cmd to Ctrl.`);
+                if (this._keyDownList["MetaLeft"]) {
+                    this._sendKeyEvent(this._keyDownList["MetaLeft"], "MetaLeft", false);
+                }
+                if (this._keyDownList["MetaRight"]) {
+                    this._sendKeyEvent(this._keyDownList["MetaRight"], "MetaRight", false);
+                }
+                this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
+                this._macCmdSwapped = true;
             }
-            if (this._keyDownList["MetaRight"]) {
-                this._sendKeyEvent(this._keyDownList["MetaRight"], "MetaRight", false);
-                delete this._keyDownList["MetaRight"];
-            }
-            this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
         }
 
         if (browser.isMac() || browser.isIOS()) {
@@ -1341,6 +1424,32 @@ export class Input {
 
         const code = KeyboardUtil.getKeyCode(event);
 
+        if (browser.isMac() && (code === 'MetaLeft' || code === 'MetaRight')) {
+            console.log(`macOS: Command key ('${code}') released. Cleaning up potentially stuck keys.`);
+
+            const pressedCodes = Object.keys(this._keyDownList);
+            for (const pressedCode of pressedCodes) {
+                // Ignore the meta key that is currently being released, and other modifiers.
+                if (pressedCode === 'ShiftLeft' || pressedCode === 'ShiftRight' ||
+                    pressedCode === 'ControlLeft' || pressedCode === 'ControlRight' ||
+                    pressedCode === 'AltLeft' || pressedCode === 'AltRight' ||
+                    pressedCode === 'MetaLeft' || pressedCode === 'MetaRight') {
+                    continue;
+                }
+
+                console.log(`macOS: Force-releasing stuck key: ${pressedCode}`);
+                this._sendKeyEvent(this._keyDownList[pressedCode], pressedCode, false);
+            }
+            
+            if (this._macCmdSwapped) {
+                console.log("macOS: Releasing the swapped virtual Ctrl key.");
+                if ('ControlLeft' in this._keyDownList) {
+                    this._sendKeyEvent(this._keyDownList['ControlLeft'], 'ControlLeft', false);
+                }
+                this._macCmdSwapped = false;
+            }
+        }
+
         if (this._altGrArmed) { // Abort AltGr if keyup is not AltRight
             this._altGrArmed = false;
             clearTimeout(this._altGrTimeout);
@@ -1348,8 +1457,6 @@ export class Input {
         }
 
         if ((browser.isMac() || browser.isIOS()) && (code === 'CapsLock')) {
-            // CapsLock on macOS doesn't send keyup, so we fake it on keydown.
-            // Nothing to do here for keyup.
             return;
         }
 
@@ -1419,24 +1526,53 @@ export class Input {
             return;
         }
         for (let i = 0; i < text.length; i++) {
-            const keysym = Keysyms.lookup(text.charCodeAt(i));
-            if (keysym) {
-                this.send("kd," + keysym);
-                this.send("ku," + keysym);
+            const char = text[i];
+            const isUpperCase = char >= 'A' && char <= 'Z';
+            if (isUpperCase) {
+                this.send("kd," + KeyTable.XK_Shift_L);
+                const lowerChar = char.toLowerCase();
+                const letterKeysym = Keysyms.lookup(lowerChar.charCodeAt(0));
+                if (letterKeysym) {
+                    this.send("kd," + letterKeysym);
+                    this.send("ku," + letterKeysym);
+                }
+                this.send("ku," + KeyTable.XK_Shift_L);
+            } else {
+                const keysym = Keysyms.lookup(char.charCodeAt(0));
+                if (keysym) {
+                    this.send("kd," + keysym);
+                    this.send("ku," + keysym);
+                }
             }
         }
         event.target.value = '';
     }
 
     _mouseButtonMovement(event) {
+        this.cursorDiv.style.display = 'block';
+        if (this.element.style.cursor !== 'none') {
+            this.element.style.cursor = 'none';
+        }
+        let visualClientX = event.clientX;
+        let visualClientY = event.clientY;
+        if (event.getPredictedEvents && typeof event.getPredictedEvents === 'function') {
+            const predictedEvents = event.getPredictedEvents();
+            if (predictedEvents.length > 0) {
+                const lastPredictedEvent = predictedEvents[predictedEvents.length - 1];
+                visualClientX = lastPredictedEvent.clientX;
+                visualClientY = lastPredictedEvent.clientY;
+            }
+        }
+        this._updateCursorPosition(visualClientX, visualClientY);
+        this._latestMouseX = visualClientX;
+        this._latestMouseY = visualClientY;
         if (this._trackpadMode) return;
         const client_dpr = window.devicePixelRatio || 1;
         const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
-
-        const down = (event.type === 'mousedown' ? 1 : 0);
+        const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
-        if (event.type === 'mousedown' || event.type === 'mouseup') {
+        if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
             if (event.button === 3) {
                 event.preventDefault();
             } else if (event.button === 4) {
@@ -1449,17 +1585,14 @@ export class Input {
             event.preventDefault();
             return;
         }
-
         if (document.pointerLockElement === this.element || document.pointerLockElement === canvas) {
             mtype = "m2";
             let movementX_logical = event.movementX || 0;
             let movementY_logical = event.movementY || 0;
-
-            // For pointer lock, movementX/Y are logical. Scale to physical if not useCssScaling.
             this.x = Math.round(movementX_logical * dpr_for_input_coords);
             this.y = Math.round(movementY_logical * dpr_for_input_coords);
 
-        } else if (event.type === 'mousemove') {
+        } else if (event.type === 'mousemove' || event.type === 'pointermove') {
              if (window.isManualResolutionMode && canvas) {
                 const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
                 if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
@@ -1467,10 +1600,8 @@ export class Input {
                     const mouseY_on_canvas_logical_css = event.clientY - canvasRect.top;
                     const scaleX = canvas.width / canvasRect.width;
                     const scaleY = canvas.height / canvasRect.height;
-
                     let coordX = mouseX_on_canvas_logical_css * scaleX;
                     let coordY = mouseY_on_canvas_logical_css * scaleY;
-
                     this.x = Math.max(0, Math.min(canvas.width, Math.round(coordX)));
                     this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
                 } else {
@@ -1500,6 +1631,28 @@ export class Input {
         }
         var toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
         this.send(toks.join(","));
+    }
+
+    _handlePointerDown(event) {
+        if (event.pointerType !== 'pen') {
+            return;
+        }
+        event.preventDefault();
+        this._mouseButtonMovement(event);
+    }
+
+    _handlePointerMove(event) {
+        if (event.pointerType !== 'pen') {
+           return;
+        }
+        this._mouseButtonMovement(event);
+    }
+ 
+    _handlePointerUp(event) {
+        if (event.pointerType !== 'pen') {
+            return;
+        }
+        this._mouseButtonMovement(event);
     }
 
     _handleTrackpadEvent(event) {
@@ -1641,6 +1794,9 @@ export class Input {
     }
 
     _calculateTouchCoordinates(touchPoint) {
+        this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
+        this._latestMouseX = touchPoint.clientX;
+        this._latestMouseY = touchPoint.clientY;
         const client_dpr = window.devicePixelRatio || 1; // Actual client DPR
         const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
@@ -1683,12 +1839,37 @@ export class Input {
     }
 
     setTrackpadMode(enabled) {
-        this._trackpadMode = !!enabled;
-        console.log(`Input: Trackpad mode ${this._trackpadMode ? 'enabled' : 'disabled'}.`);
-        // Reset state on mode change
-        this._trackpadTouchIdentifier = null;
-        this._lastTrackpadX = 0;
-        this._lastTrackpadY = 0;
+        const newMode = !!enabled;
+        if (this._trackpadMode === newMode) {
+            return;
+        }
+
+        console.log(`Input: Trackpad mode ${newMode ? 'enabled' : 'disabled'}.`);
+        this._trackpadMode = newMode;
+
+        this._activeTouches.clear();
+        this._activeTouchIdentifier = null;
+        this._isTwoFingerGesture = false;
+        this._touchScrollLastCentroid = null;
+
+        if (this._longPressTimer) {
+            clearTimeout(this._longPressTimer);
+            this._longPressTimer = null;
+            this._longPressTouchIdentifier = null;
+        }
+
+        if (this.buttonMask !== 0) {
+            this.buttonMask = 0;
+            this._sendMouseState();
+        }
+
+        if (this._trackpadMode) {
+            this.cursorDiv.style.display = 'none';
+            this.element.style.cursor = 'default';
+        } else {
+            this.element.style.cursor = 'none';
+            this.cursorDiv.style.display = 'none';
+        }
     }
 
     _handleTouchEvent(event) {
@@ -1707,6 +1888,7 @@ export class Input {
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
 
         if (type === 'touchstart') {
+            this.cursorDiv.style.display = 'block';
             for (let i = 0; i < event.changedTouches.length; i++) {
                 const touch = event.changedTouches[i];
                 if (!this._activeTouches.has(touch.identifier)) {
@@ -1762,6 +1944,7 @@ export class Input {
             } else {
                 if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
                 if (touchCount === 2) {
+                    this.cursorDiv.style.visibility = 'hidden';
                     this._isTwoFingerGesture = true; this._activeTouchIdentifier = null;
                     const touches = Array.from(this._activeTouches.values());
                     this._touchScrollLastCentroid = {
@@ -1867,6 +2050,9 @@ export class Input {
             if (!swipeDetected) {
                 const remainingTouchCount = this._activeTouches.size;
                 if (this._isTwoFingerGesture && remainingTouchCount < 2) {
+                    if (!this._trackpadMode) {
+                        this.cursorDiv.style.visibility = 'visible';
+                    }
                     this._isTwoFingerGesture = false;
                     this._touchScrollLastCentroid = null;
                 }
@@ -1992,20 +2178,22 @@ export class Input {
     }
 
     _mouseWheel(event) {
-        var mtype = (document.pointerLockElement === this.element ? "m2" : "m");
-        var button = (event.deltaY < 0) ? 4 : 3;
-        var deltaY = Math.abs(Math.trunc(event.deltaY));
-        if (deltaY < this._smallestDeltaY && deltaY != 0) { this._smallestDeltaY = deltaY; }
-        deltaY = Math.max(1, Math.floor(deltaY / this._smallestDeltaY));
-        var magnitude = Math.min(deltaY, this._scrollMagnitude);
-        var mask = 1 << button;
-        var toks;
-        this.buttonMask |= mask;
-        toks = [ mtype, this.x, this.y, this.buttonMask, magnitude ];
-        this.send(toks.join(","));
-        this.buttonMask &= ~mask;
-        toks = [ mtype, this.x, this.y, this.buttonMask, magnitude ];
-        this.send(toks.join(","));
+        if (event.deltaY !== 0) {
+            const direction = (event.deltaY < 0) ? 'up' : 'down';
+            let deltaY = Math.abs(Math.trunc(event.deltaY));
+            if (deltaY < this._smallestDeltaY && deltaY !== 0) {
+                this._smallestDeltaY = deltaY;
+            }
+            const verticalMagnitude = Math.max(1, Math.floor(deltaY / this._smallestDeltaY));
+            const magnitude = Math.min(verticalMagnitude, this._scrollMagnitude);
+            this._triggerMouseWheel(direction, magnitude);
+        }
+        if (event.deltaX !== 0) {
+            const direction = (event.deltaX < 0) ? 'left' : 'right';
+            const horizontalMagnitude = Math.max(1, Math.round(Math.abs(event.deltaX) / 100));
+            const magnitude = Math.min(horizontalMagnitude, this._scrollMagnitude);
+            this._triggerHorizontalMouseWheel(direction, magnitude);
+        }
     }
 
     _contextMenu(event) {
@@ -2076,13 +2264,17 @@ export class Input {
     _gamepadButton(gp_num, btn_num, val) {
         const server_gp_num = this.playerIndex;
         this.send("js,b," + server_gp_num + "," + btn_num + "," + val);
-        window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_num, buttonIndex: btn_num, value: val }, window.location.origin);
+        if (this._isSidebarOpen) {
+            window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_num, buttonIndex: btn_num, value: val }, window.location.origin);
+        }
     }
 
     _gamepadAxis(gp_num, axis_num, val) {
         const server_gp_num = this.playerIndex;
         this.send("js,a," + server_gp_num + "," + axis_num + "," + val);
-        window.postMessage({ type: 'gamepadAxisUpdate', gamepadIndex: server_gp_num, axisIndex: axis_num, value: val }, window.location.origin);
+        if (this._isSidebarOpen) {
+            window.postMessage({ type: 'gamepadAxisUpdate', gamepadIndex: server_gp_num, axisIndex: axis_num, value: val }, window.location.origin);
+        }
     }
 
     _onFullscreenChange() {
@@ -2109,15 +2301,6 @@ export class Input {
         return false;
     }
 
-    getCursorScaleFactor({ remoteResolutionEnabled = false } = {}) {
-        if (remoteResolutionEnabled) { this.cursorScaleFactor = null; return; }
-        var clientResolution = this.getWindowResolution();
-        var serverHeight = this.element.offsetHeight; var serverWidth = this.element.offsetWidth;
-        if (isNaN(serverWidth) || isNaN(serverHeight) || serverWidth <=0 || serverHeight <= 0) { return; }
-        if (Math.abs(clientResolution[0] - serverWidth) <= 10 && Math.abs(clientResolution[1] - serverHeight) <= 10) { this.cursorScaleFactor = null; return; }
-        this.cursorScaleFactor = Math.sqrt((serverWidth ** 2) + (serverHeight ** 2)) / Math.sqrt((clientResolution[0] ** 2) + (clientResolution[1] ** 2));
-    }
-
     getWindowResolution() {
         const bodyWidth = document.body ? document.body.offsetWidth : window.innerWidth;
         const bodyHeight = document.body ? document.body.offsetHeight : window.innerHeight;
@@ -2134,10 +2317,17 @@ export class Input {
         this.listeners.push(addListener(window, 'resize', this._windowMath, this));
         this.listeners.push(addListener(window, 'gamepadconnected', this._gamepadConnected, this));
         this.listeners.push(addListener(window, 'gamepaddisconnected', this._gamepadDisconnect, this));
-        
+        this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
+
         if (!this.isSharedMode) {
             this.attach_context();
-        }
+        } else {
+            const preventDefaultHandler = (e) => e.preventDefault();
+            this.listeners.push(addListener(this.element, 'touchstart', preventDefaultHandler, this));
+            this.listeners.push(addListener(this.element, 'touchend', preventDefaultHandler, this));
+            this.listeners.push(addListener(this.element, 'touchmove', preventDefaultHandler, this));
+            this.listeners.push(addListener(this.element, 'touchcancel', preventDefaultHandler, this));
+        }    
     }
 
     attach_context() {
@@ -2145,7 +2335,8 @@ export class Input {
         this.listeners_context.push(addListener(window, 'keyup', this._handleKeyUp, this, true));
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
-
+        this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
+        this.listeners_context.push(addListener(document, 'touchstart', this._handleOutsideClick, this, true));
 
         this.listeners_context.push(addListener(this.element, 'wheel', this._mouseWheelWrapper, this));
         this.listeners_context.push(addListener(this.element, 'contextmenu', this._contextMenu, this));
@@ -2154,7 +2345,10 @@ export class Input {
         this.listeners_context.push(addListener(compositionTarget, 'compositionstart', this._compositionStart, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionupdate', this._compositionUpdate, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionend', this._compositionEnd, this));
-
+        this.listeners_context.push(addListener(this.element, 'pointerdown', this._handlePointerDown, this));
+        this.listeners_context.push(addListener(this.element, 'pointermove', this._handlePointerMove, this));
+        this.listeners_context.push(addListener(this.element, 'pointerup', this._handlePointerUp, this));
+        this.listeners_context.push(addListener(this.element, 'pointercancel', this._handlePointerUp, this)); 
 
         if ('ontouchstart' in window) {
             this.listeners_context.push(addListener(this.element, 'touchstart', this._handleTouchEvent, this, false));
@@ -2164,7 +2358,7 @@ export class Input {
         }
         this.listeners_context.push(addListener(this.element, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(this.element, 'mousedown', this._mouseButtonMovement, this));
-        this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
+        this.listeners_context.push(addListener(this.element, 'mouseup', this._mouseButtonMovement, this));
 
         if (document.fullscreenElement === this.element.parentElement) {
              if (document.pointerLockElement !== this.element) {

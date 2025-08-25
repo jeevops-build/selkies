@@ -12,7 +12,7 @@ const encoderOptions = [
 ];
 
 const framerateOptions = [
-  8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 165,
+  8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144,
 ];
 
 const videoBitrateOptions = [
@@ -22,7 +22,10 @@ const videoBitrateOptions = [
 
 const videoBufferOptions = Array.from({ length: 16 }, (_, i) => i);
 
-const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 1];
+const videoCRFOptions = [...[50, 45, 40, 35, 30], ...Array.from({ length: 12 }, (_, i) => 28 - i), ...[15, 10, 5]];
+
+const jpegQualityOptions = Array.from({ length: (100 - 5) / 5 + 1 }, (_, i) => 5 + i * 5);
+const paintOverJpegQualityOptions = Array.from({ length: (100 - 5) / 5 + 1 }, (_, i) => 5 + i * 5);
 
 const commonResolutionValues = [
   "",
@@ -51,10 +54,15 @@ const dpiScalingOptions = [
 ];
 const DEFAULT_SCALING_DPI = 96;
 
-const STATS_READ_INTERVAL_MS = 100;
+const STATS_READ_INTERVAL_MS = 500;
 const MAX_AUDIO_BUFFER = 10;
 const DEFAULT_FRAMERATE = 60;
 const DEFAULT_VIDEO_BITRATE = 8000;
+const DEFAULT_JPEG_QUALITY = 60;
+const DEFAULT_PAINT_OVER_JPEG_QUALITY = 90;
+const DEFAULT_USE_CPU = false;
+const DEFAULT_H264_PAINTOVER_CRF = 18;
+const DEFAULT_USE_PAINT_OVER_QUALITY = true;
 const DEFAULT_VIDEO_BUFFER_SIZE = 0;
 const DEFAULT_ENCODER = encoderOptions[0];
 const DEFAULT_VIDEO_CRF = 25;
@@ -499,13 +507,30 @@ function AppsModal({ isOpen, onClose, t }) {
   );
 }
 
+const getStorageAppName = () => {
+  if (typeof window === 'undefined') return '';
+  const urlForKey = window.location.href.split('#')[0];
+  return urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+};
+const storageAppName = getStorageAppName();
+const getPrefixedKey = (key) => `${storageAppName}_${key}`;
+
 function Sidebar({ isOpen }) {
   const [langCode, setLangCode] = useState("en");
   const [translator, setTranslator] = useState(() => getTranslator("en"));
+  useEffect(() => {
+    window.postMessage({ type: 'sidebarVisibilityChanged', isOpen }, window.location.origin);
+  }, [isOpen]);
+  const [currentDeviceDpi, setCurrentDeviceDpi] = useState(null);
   const [isMobile, setIsMobile] = useState(false);
   const [isTrackpadModeActive, setIsTrackpadModeActive] = useState(false);
   const [hasDetectedTouch, setHasDetectedTouch] = useState(false);
-
+  const [heldKeys, setHeldKeys] = useState({
+    Control: false,
+    Alt: false,
+    Meta: false,
+  });
+  const [isKeyboardButtonVisible, setIsKeyboardButtonVisible] = useState(true);
   const [isTouchGamepadActive, setIsTouchGamepadActive] = useState(false);
   const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState(false);
 
@@ -517,6 +542,20 @@ function Sidebar({ isOpen }) {
     );
     setLangCode(primaryLang);
     setTranslator(getTranslator(primaryLang));
+  }, []);
+
+  useEffect(() => {
+    const dpr = window.devicePixelRatio || 1;
+    const targetDpi = dpr * 96;
+
+    if (dpiScalingOptions && dpiScalingOptions.length > 0) {
+      const closestOption = dpiScalingOptions.reduce((prev, curr) => {
+        return Math.abs(curr.value - targetDpi) < Math.abs(prev.value - targetDpi)
+          ? curr
+          : prev;
+      });
+      setCurrentDeviceDpi(closestOption.value);
+    }
   }, []);
 
   useEffect(() => {
@@ -564,49 +603,133 @@ function Sidebar({ isOpen }) {
     };
   }, []);
 
-  const { t, raw } = translator;
+  useEffect(() => {
+    const setRealViewportHeight = () => {
+      const vh = window.innerHeight * 0.01;
+      document.documentElement.style.setProperty('--vh', `${vh}px`);
+    };
+    window.addEventListener('resize', setRealViewportHeight);
+    window.addEventListener('orientationchange', setRealViewportHeight);
+    setRealViewportHeight();
+    return () => {
+      window.removeEventListener('resize', setRealViewportHeight);
+      window.removeEventListener('orientationchange', setRealViewportHeight);
+    };
+  }, []);
 
+  const { t, raw } = translator;
+  const sendKeyEvent = (type, key, code, modifierState) => {
+    const event = new KeyboardEvent(type, {
+      key: key,
+      code: code,
+      ctrlKey: modifierState.Control,
+      altKey: modifierState.Alt,
+      metaKey: modifierState.Meta,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+  };
+  const handleHoldKeyClick = (key, code) => {
+    const isCurrentlyHeld = heldKeys[key];
+    const currentHeldCount = Object.values(heldKeys).filter(Boolean).length;
+    if (!isCurrentlyHeld && currentHeldCount === 0) {
+      window.postMessage({ type: 'setSynth', value: true }, window.location.origin);
+    } else if (isCurrentlyHeld && currentHeldCount === 1) {
+      window.postMessage({ type: 'setSynth', value: false }, window.location.origin);
+    }
+    const nextHeldState = {
+      ...heldKeys,
+      [key]: !isCurrentlyHeld,
+    };
+    setHeldKeys(nextHeldState);
+    if (isCurrentlyHeld) {
+      sendKeyEvent('keyup', key, code, nextHeldState);
+      console.log(`Dashboard: Dispatched keyup for ${key} with state:`, nextHeldState);
+    } else {
+      sendKeyEvent('keydown', key, code, nextHeldState);
+      console.log(`Dashboard: Dispatched keydown for ${key} with state:`, nextHeldState);
+    }
+  };
+  const handleOnceKeyClick = (key, code) => {
+    console.log(`Dashboard: Dispatching key press for ${key} with modifiers:`, heldKeys);
+    sendKeyEvent('keydown', key, code, heldKeys);
+    setTimeout(() => {
+      sendKeyEvent('keyup', key, code, heldKeys);
+    }, 50);
+  };
+  const toggleKeyboardButtonVisibility = () => {
+    setIsKeyboardButtonVisible(prev => !prev);
+  };
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const [encoder, setEncoder] = useState(
-    localStorage.getItem("encoder") || DEFAULT_ENCODER
+    localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
   );
   const [dynamicEncoderOptions, setDynamicEncoderOptions] =
     useState(encoderOptions);
   const [framerate, setFramerate] = useState(
-    parseInt(localStorage.getItem("videoFramerate"), 10) || DEFAULT_FRAMERATE
+    parseInt(localStorage.getItem(getPrefixedKey("videoFramerate")), 10) ||
+      DEFAULT_FRAMERATE
   );
   const [videoBitRate, setVideoBitRate] = useState(
-    parseInt(localStorage.getItem("videoBitRate"), 10) || DEFAULT_VIDEO_BITRATE
+    parseInt(localStorage.getItem(getPrefixedKey("videoBitRate")), 10) ||
+      DEFAULT_VIDEO_BITRATE
   );
   const [videoBufferSize, setVideoBufferSize] = useState(
-    parseInt(localStorage.getItem("videoBufferSize"), 10) ||
+    parseInt(localStorage.getItem(getPrefixedKey("videoBufferSize")), 10) ||
       DEFAULT_VIDEO_BUFFER_SIZE
   );
   const [videoCRF, setVideoCRF] = useState(
-    parseInt(localStorage.getItem("videoCRF"), 10) || DEFAULT_VIDEO_CRF
+    parseInt(localStorage.getItem(getPrefixedKey("videoCRF")), 10) ||
+      DEFAULT_VIDEO_CRF
   );
+  const [h264PaintoverCRF, setH264PaintoverCRF] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("h264_paintover_crf")), 10) ||
+      DEFAULT_H264_PAINTOVER_CRF
+  );
+  const [usePaintOverQuality, setUsePaintOverQuality] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
+    return saved !== null ? saved === 'true' : DEFAULT_USE_PAINT_OVER_QUALITY;
+  });
   const [h264FullColor, setH264FullColor] = useState(
-    localStorage.getItem("h264_fullcolor") === "true"
+    localStorage.getItem(getPrefixedKey("h264_fullcolor")) === "true"
+  );
+  const [jpegQuality, setJpegQuality] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("jpegQuality")), 10) ||
+      DEFAULT_JPEG_QUALITY
+  );
+  const [paintOverJpegQuality, setPaintOverJpegQuality] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("paintOverJpegQuality")), 10) ||
+      DEFAULT_PAINT_OVER_JPEG_QUALITY
+  );
+  const [useCpu, setUseCpu] = useState(
+    localStorage.getItem(getPrefixedKey("useCpu")) === "true"
   );
   const [h264StreamingMode, setH264StreamingMode] = useState(
-    localStorage.getItem("h264_streaming_mode") === "true"
+    localStorage.getItem(getPrefixedKey("h264_streaming_mode")) === "true"
   );
   const [selectedDpi, setSelectedDpi] = useState(
-    parseInt(localStorage.getItem("scalingDPI"), 10) || DEFAULT_SCALING_DPI
+    parseInt(localStorage.getItem(getPrefixedKey("SCALING_DPI")), 10) || DEFAULT_SCALING_DPI
   );
-  const [manualWidth, setManualWidth] = useState("");
-  const [manualHeight, setManualHeight] = useState("");
+  const [manualWidth, setManualWidth] = useState(localStorage.getItem(getPrefixedKey("manualWidth")) || "");
+  const [manualHeight, setManualHeight] = useState(localStorage.getItem(getPrefixedKey("manualHeight")) || "");
   const [scaleLocally, setScaleLocally] = useState(() => {
-    const saved = localStorage.getItem("scaleLocallyManual");
+    const saved = localStorage.getItem(getPrefixedKey("scaleLocallyManual"));
     return saved !== null ? saved === "true" : DEFAULT_SCALE_LOCALLY;
   });
   const [hidpiEnabled, setHidpiEnabled] = useState(() => {
-    const saved = localStorage.getItem("hidpiEnabled");
+    const saved = localStorage.getItem(getPrefixedKey("useCssScaling"));
+    return saved !== "true";
+  });
+  const [antiAliasing, setAntiAliasing] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
     return saved !== null ? saved === "true" : true;
   });
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
   const [audioBuffer, setAudioBuffer] = useState(0);
+  const [bandwidthMbps, setBandwidthMbps] = useState(0);
+  const [latencyMs, setLatencyMs] = useState(0);
   const [cpuPercent, setCpuPercent] = useState(0);
   const [gpuPercent, setGpuPercent] = useState(0);
   const [sysMemPercent, setSysMemPercent] = useState(0);
@@ -666,7 +789,6 @@ function Sidebar({ isOpen }) {
 
   const debouncedUpdateFramerateSettings = useCallback(
     debounce((newFramerate) => {
-      localStorage.setItem("videoFramerate", newFramerate.toString());
       window.postMessage(
         { type: "settings", settings: { videoFramerate: newFramerate } },
         window.location.origin
@@ -677,7 +799,6 @@ function Sidebar({ isOpen }) {
 
   const debouncedUpdateVideoBitrateSettings = useCallback(
     debounce((newBitrate) => {
-      localStorage.setItem("videoBitRate", newBitrate.toString());
       window.postMessage(
         { type: "settings", settings: { videoBitRate: newBitrate } },
         window.location.origin
@@ -688,7 +809,6 @@ function Sidebar({ isOpen }) {
 
   const debouncedUpdateVideoBufferSizeSettings = useCallback(
     debounce((newSize) => {
-      localStorage.setItem("videoBufferSize", newSize.toString());
       window.postMessage(
         { type: "settings", settings: { videoBufferSize: newSize } },
         window.location.origin
@@ -699,7 +819,6 @@ function Sidebar({ isOpen }) {
 
   const debouncedUpdateVideoCRFSettings = useCallback(
     debounce((newCRF) => {
-      localStorage.setItem("videoCRF", newCRF.toString());
       window.postMessage(
         { type: "settings", settings: { videoCRF: newCRF } },
         window.location.origin
@@ -708,9 +827,28 @@ function Sidebar({ isOpen }) {
     []
   );
 
+  const debouncedUpdateH264PaintoverCRFSettings = useCallback(
+    debounce((newCRF) => {
+      window.postMessage(
+        { type: "settings", settings: { h264_paintover_crf: newCRF } },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
+  const debouncedUpdateUsePaintOverQualitySettings = useCallback(
+    debounce((newVal) => {
+      window.postMessage(
+        { type: "settings", settings: { use_paint_over_quality: newVal } },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
   const debouncedUpdateH264FullColorSettings = useCallback(
     debounce((newFullColor) => {
-      localStorage.setItem("h264_fullcolor", newFullColor.toString());
       window.postMessage(
         { type: "settings", settings: { h264_fullcolor: newFullColor } },
         window.location.origin
@@ -721,9 +859,38 @@ function Sidebar({ isOpen }) {
 
   const debouncedUpdateH264StreamingModeSettings = useCallback(
     debounce((newStreamingMode) => {
-      localStorage.setItem("h264_streaming_mode", newStreamingMode.toString());
       window.postMessage(
         { type: "settings", settings: { h264_streaming_mode: newStreamingMode } },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
+  const debouncedUpdateJpegQualitySettings = useCallback(
+    debounce((newQuality) => {
+      window.postMessage(
+        { type: "settings", settings: { jpegQuality: newQuality } },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
+  const debouncedUpdatePaintOverJpegQualitySettings = useCallback(
+    debounce((newQuality) => {
+      window.postMessage(
+        { type: "settings", settings: { paintOverJpegQuality: newQuality } },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
+  const debouncedUpdateUseCpuSettings = useCallback(
+    debounce((newUseCpu) => {
+      window.postMessage(
+        { type: "settings", settings: { useCpu: newUseCpu } },
         window.location.origin
       );
     }, DEBOUNCE_DELAY),
@@ -733,7 +900,6 @@ function Sidebar({ isOpen }) {
   const handleDpiScalingChange = (event) => {
     const newDpi = parseInt(event.target.value, 10);
     setSelectedDpi(newDpi);
-    localStorage.setItem("scalingDPI", newDpi.toString());
     window.postMessage(
       { type: "settings", settings: { SCALING_DPI: newDpi } },
       window.location.origin
@@ -743,7 +909,7 @@ function Sidebar({ isOpen }) {
     const title = t("notifications.scalingTitle", "Scaling Updated: Action Required");
     const message = t(
       "notifications.scalingMessage", 
-      "New scaling applied. To see changes, restart: the container, your desktop session by logging out, or the running application."
+      "New scaling applied. Some applications or desktop environments might require a restart."
     );
 
     setNotifications(prev => {
@@ -995,7 +1161,6 @@ function Sidebar({ isOpen }) {
   const handleEncoderChange = (event) => {
     const selectedEncoder = event.target.value;
     setEncoder(selectedEncoder);
-    localStorage.setItem("encoder", selectedEncoder);
     window.postMessage(
       { type: "settings", settings: { encoder: selectedEncoder } },
       window.location.origin
@@ -1005,43 +1170,77 @@ function Sidebar({ isOpen }) {
     const index = parseInt(event.target.value, 10);
     const selectedFramerate = framerateOptions[index];
     if (selectedFramerate !== undefined) {
-      setFramerate(selectedFramerate); // Immediate UI update
-      debouncedUpdateFramerateSettings(selectedFramerate); // Debounced action
+      setFramerate(selectedFramerate);
+      debouncedUpdateFramerateSettings(selectedFramerate);
+    }
+  };
+  const handleJpegQualityChange = (event) => {
+    const index = parseInt(event.target.value, 10);
+    const selectedQuality = jpegQualityOptions[index];
+    if (selectedQuality !== undefined) {
+      setJpegQuality(selectedQuality);
+      debouncedUpdateJpegQualitySettings(selectedQuality);
+    }
+  };
+  const handlePaintOverJpegQualityChange = (event) => {
+    const index = parseInt(event.target.value, 10);
+    const selectedQuality = paintOverJpegQualityOptions[index];
+    if (selectedQuality !== undefined) {
+      setPaintOverJpegQuality(selectedQuality);
+      debouncedUpdatePaintOverJpegQualitySettings(selectedQuality);
     }
   };
   const handleVideoBitrateChange = (event) => {
     const index = parseInt(event.target.value, 10);
     const selectedBitrate = videoBitrateOptions[index];
     if (selectedBitrate !== undefined) {
-      setVideoBitRate(selectedBitrate); // Immediate UI update
-      debouncedUpdateVideoBitrateSettings(selectedBitrate); // Debounced action
+      setVideoBitRate(selectedBitrate);
+      debouncedUpdateVideoBitrateSettings(selectedBitrate);
     }
   };
   const handleVideoBufferSizeChange = (event) => {
     const index = parseInt(event.target.value, 10);
     const selectedSize = videoBufferOptions[index];
     if (selectedSize !== undefined) {
-      setVideoBufferSize(selectedSize); // Immediate UI update
-      debouncedUpdateVideoBufferSizeSettings(selectedSize); // Debounced action
+      setVideoBufferSize(selectedSize);
+      debouncedUpdateVideoBufferSizeSettings(selectedSize);
     }
   };
   const handleVideoCRFChange = (event) => {
     const index = parseInt(event.target.value, 10);
     const selectedCRF = videoCRFOptions[index];
     if (selectedCRF !== undefined) {
-      setVideoCRF(selectedCRF); // Immediate UI update
-      debouncedUpdateVideoCRFSettings(selectedCRF); // Debounced action
+      setVideoCRF(selectedCRF);
+      debouncedUpdateVideoCRFSettings(selectedCRF);
+    }
+  };
+  const handleH264PaintoverCRFChange = (event) => {
+    const index = parseInt(event.target.value, 10);
+    const selectedCRF = videoCRFOptions[index];
+    if (selectedCRF !== undefined) {
+      setH264PaintoverCRF(selectedCRF);
+      debouncedUpdateH264PaintoverCRFSettings(selectedCRF);
     }
   };
   const handleH264FullColorToggle = () => {
     const newFullColorState = !h264FullColor;
-    setH264FullColor(newFullColorState); // Immediate UI update
-    debouncedUpdateH264FullColorSettings(newFullColorState); // Debounced action
+    setH264FullColor(newFullColorState);
+    debouncedUpdateH264FullColorSettings(newFullColorState);
+  };
+  const handleUsePaintOverQualityToggle = () => {
+    const newUsePaintOverQualityState = !usePaintOverQuality;
+    setUsePaintOverQuality(newUsePaintOverQualityState);
+    debouncedUpdateUsePaintOverQualitySettings(newUsePaintOverQualityState);
+  };
+  const handleUseCpuToggle = () => {
+    const newUseCpuState = !useCpu;
+    setUseCpu(newUseCpuState);
+    debouncedUpdateUseCpuSettings(newUseCpuState);
   };
   const handleH264StreamingModeToggle = () => {
     const newStreamingModeState = !h264StreamingMode;
-    setH264StreamingMode(newStreamingModeState); // Immediate UI update
-    debouncedUpdateH264StreamingModeSettings(newStreamingModeState); // Debounced action
+    setH264StreamingMode(newStreamingModeState);
+    debouncedUpdateH264StreamingModeSettings(newStreamingModeState);
   };
   const handleAudioInputChange = (event) => {
     const deviceId = event.target.value;
@@ -1094,7 +1293,6 @@ function Sidebar({ isOpen }) {
   const handleScaleLocallyToggle = () => {
     const newState = !scaleLocally;
     setScaleLocally(newState);
-    localStorage.setItem("scaleLocallyManual", newState.toString());
     window.postMessage(
       { type: "setScaleLocally", value: newState },
       window.location.origin
@@ -1103,9 +1301,16 @@ function Sidebar({ isOpen }) {
   const handleHidpiToggle = () => {
     const newHidpiState = !hidpiEnabled;
     setHidpiEnabled(newHidpiState);
-    localStorage.setItem("hidpiEnabled", newHidpiState.toString());
     window.postMessage(
       { type: "setUseCssScaling", value: !newHidpiState },
+      window.location.origin
+    );
+  };
+  const handleAntiAliasingToggle = () => {
+    const newState = !antiAliasing;
+    setAntiAliasing(newState);
+    window.postMessage(
+      { type: "setAntiAliasing", value: newState },
       window.location.origin
     );
   };
@@ -1204,7 +1409,6 @@ function Sidebar({ isOpen }) {
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
-    localStorage.setItem("theme", newTheme);
   };
   const handleMouseEnter = (e, itemKey) => {
     setHoveredItem(itemKey);
@@ -1289,6 +1493,10 @@ function Sidebar({ isOpen }) {
           return t("sections.stats.tooltipFps", { value: clientFps });
         case "audio":
           return t("sections.stats.tooltipAudio", { value: audioBuffer });
+        case "bandwidth":
+          return t("sections.stats.tooltipBandwidth", { value: bandwidthMbps.toFixed(2) }, `Bandwidth: ${bandwidthMbps.toFixed(2)} Mbps`);
+        case "latency":
+          return t("sections.stats.tooltipLatency", { value: latencyMs.toFixed(1) }, `Latency: ${latencyMs.toFixed(1)} ms`);
         default:
           return "";
       }
@@ -1339,86 +1547,9 @@ function Sidebar({ isOpen }) {
     window.dispatchEvent(new CustomEvent("requestFileUpload"));
 
   useEffect(() => {
-    const savedEncoder = localStorage.getItem("encoder");
-    if (savedEncoder && encoderOptions.includes(savedEncoder))
-      setEncoder(savedEncoder);
-    else {
-      setEncoder(DEFAULT_ENCODER);
-      localStorage.setItem("encoder", DEFAULT_ENCODER);
+    if (!isOpen) {
+      return;
     }
-    const savedFramerate = parseInt(localStorage.getItem("videoFramerate"), 10);
-    if (!isNaN(savedFramerate) && framerateOptions.includes(savedFramerate))
-      setFramerate(savedFramerate);
-    else {
-      setFramerate(DEFAULT_FRAMERATE);
-      localStorage.setItem("videoFramerate", DEFAULT_FRAMERATE.toString());
-    }
-    const savedVideoBitRate = parseInt(
-      localStorage.getItem("videoBitRate"),
-      10
-    );
-    if (
-      !isNaN(savedVideoBitRate) &&
-      videoBitrateOptions.includes(savedVideoBitRate)
-    )
-      setVideoBitRate(savedVideoBitRate);
-    else {
-      setVideoBitRate(DEFAULT_VIDEO_BITRATE);
-      localStorage.setItem("videoBitRate", DEFAULT_VIDEO_BITRATE.toString());
-    }
-    const savedVideoBufferSize = parseInt(
-      localStorage.getItem("videoBufferSize"),
-      10
-    );
-    if (
-      !isNaN(savedVideoBufferSize) &&
-      videoBufferOptions.includes(savedVideoBufferSize)
-    )
-      setVideoBufferSize(savedVideoBufferSize);
-    else {
-      setVideoBufferSize(DEFAULT_VIDEO_BUFFER_SIZE);
-      localStorage.setItem(
-        "videoBufferSize",
-        DEFAULT_VIDEO_BUFFER_SIZE.toString()
-      );
-    }
-    const savedVideoCRF = parseInt(localStorage.getItem("videoCRF"), 10);
-    if (!isNaN(savedVideoCRF) && videoCRFOptions.includes(savedVideoCRF))
-      setVideoCRF(savedVideoCRF);
-    else {
-      setVideoCRF(DEFAULT_VIDEO_CRF);
-      localStorage.setItem("videoCRF", DEFAULT_VIDEO_CRF.toString());
-    }
-    const savedH264FullColor = localStorage.getItem("h264_fullcolor");
-    if (savedH264FullColor !== null) {
-      setH264FullColor(savedH264FullColor === "true");
-    } else {
-      setH264FullColor(false);
-      localStorage.setItem("h264_fullcolor", "false");
-    }
-    const savedH264StreamingMode = localStorage.getItem("h264_streaming_mode");
-    if (savedH264StreamingMode !== null) {
-      setH264StreamingMode(savedH264StreamingMode === "true");
-    } else {
-      setH264StreamingMode(false);
-      localStorage.setItem("h264_streaming_mode", "false");
-    }
-    const savedScalingDPI = parseInt(localStorage.getItem("scalingDPI"), 10);
-    if (!isNaN(savedScalingDPI) && dpiScalingOptions.some(opt => opt.value === savedScalingDPI)) {
-      setSelectedDpi(savedScalingDPI);
-    } else {
-      setSelectedDpi(DEFAULT_SCALING_DPI);
-      localStorage.setItem("scalingDPI", DEFAULT_SCALING_DPI.toString());
-    }
-    const initialHidpi = localStorage.getItem("hidpiEnabled");
-    const hidpiIsCurrentlyEnabled = initialHidpi !== null ? initialHidpi === "true" : true;
-    window.postMessage(
-      { type: "setUseCssScaling", value: !hidpiIsCurrentlyEnabled },
-      window.location.origin
-    );
-  }, []);
-
-  useEffect(() => {
     const readStats = () => {
       const cs = window.system_stats,
         su = cs?.mem_used ?? null,
@@ -1446,10 +1577,13 @@ function Sidebar({ isOpen }) {
       );
       setClientFps(window.fps ?? 0);
       setAudioBuffer(window.currentAudioBufferSize ?? 0);
+      const netStats = window.network_stats;
+      setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
+      setLatencyMs(netStats?.latency_ms ?? 0);
     };
     const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, []);
+  }, [isOpen]);
 
   useEffect(() => {
     const handleWindowMessage = (event) => {
@@ -1585,110 +1719,6 @@ function Sidebar({ isOpen }) {
           if (typeof message.enabled === 'boolean') {
             setIsTrackpadModeActive(message.enabled);
           }
-        } else if (message.type === "initialClientSettings") {
-          console.log(
-            "Dashboard: Received initialClientSettings",
-            message.settings
-          );
-          const receivedSettings = message.settings;
-          if (
-            receivedSettings &&
-            typeof receivedSettings === "object" &&
-            Object.keys(receivedSettings).length > 0
-          ) {
-            for (const prefixedKey in receivedSettings) {
-              if (Object.hasOwnProperty.call(receivedSettings, prefixedKey)) {
-                const valueStr = receivedSettings[prefixedKey];
-
-                if (prefixedKey.endsWith("videoBitRate")) {
-                  const val = parseInt(valueStr, 10);
-                  if (!isNaN(val) && videoBitrateOptions.includes(val)) {
-                    setVideoBitRate(val);
-                    localStorage.setItem("videoBitRate", val.toString());
-                  }
-                } else if (prefixedKey.endsWith("videoFramerate")) {
-                  const val = parseInt(valueStr, 10);
-                  if (!isNaN(val) && framerateOptions.includes(val)) {
-                    setFramerate(val);
-                    localStorage.setItem("videoFramerate", val.toString());
-                  }
-                } else if (prefixedKey.endsWith("videoCRF")) {
-                  const val = parseInt(valueStr, 10);
-                  if (!isNaN(val) && videoCRFOptions.includes(val)) {
-                    setVideoCRF(val);
-                    localStorage.setItem("videoCRF", val.toString());
-                  }
-                } else if (prefixedKey.endsWith("encoder")) {
-                  if (
-                    dynamicEncoderOptions.includes(valueStr) ||
-                    encoderOptions.includes(valueStr)
-                  ) {
-                    setEncoder(valueStr);
-                    localStorage.setItem("encoder", valueStr);
-                  }
-                } else if (prefixedKey.endsWith("videoBufferSize")) {
-                  const val = parseInt(valueStr, 10);
-                  if (!isNaN(val) && videoBufferOptions.includes(val)) {
-                    setVideoBufferSize(val);
-                    localStorage.setItem("videoBufferSize", val.toString());
-                  }
-                } else if (prefixedKey.endsWith("scaleLocallyManual")) {
-                  const val = valueStr === "true";
-                  setScaleLocally(val);
-                  localStorage.setItem("scaleLocallyManual", val.toString());
-                } else if (prefixedKey.endsWith("manualWidth")) {
-                  if (valueStr && valueStr !== "null") setManualWidth(valueStr);
-                  else setManualWidth("");
-                  localStorage.setItem(
-                    "manualWidth",
-                    valueStr && valueStr !== "null" ? valueStr : ""
-                  );
-                } else if (prefixedKey.endsWith("manualHeight")) {
-                  if (valueStr && valueStr !== "null")
-                    setManualHeight(valueStr);
-                  else setManualHeight("");
-                  localStorage.setItem(
-                    "manualHeight",
-                    valueStr && valueStr !== "null" ? valueStr : ""
-                  );
-                } else if (prefixedKey.endsWith("isManualResolutionMode")) {
-                  const isManual = valueStr === "true";
-                  localStorage.setItem(
-                    "isManualResolutionMode",
-                    isManual.toString()
-                  );
-                } else if (prefixedKey.endsWith("isGamepadEnabled")) {
-                  const isGpEnabled = valueStr === "true";
-                  setIsGamepadEnabled(isGpEnabled);
-                  localStorage.setItem(
-                    "isGamepadEnabled",
-                    isGpEnabled.toString()
-                  );
-                } else if (prefixedKey.endsWith("h264_fullcolor")) {
-                  const val = valueStr === true || valueStr === "true";
-                  setH264FullColor(val);
-                  localStorage.setItem("h264_fullcolor", val.toString());
-                } else if (prefixedKey.endsWith("h264_streaming_mode")) {
-                  const val = valueStr === true || valueStr === "true";
-                  setH264StreamingMode(val);
-                  localStorage.setItem("h264_streaming_mode", val.toString());
-                } else if (prefixedKey.endsWith("SCALING_DPI")) {
-                  const val = parseInt(valueStr, 10);
-                  if (!isNaN(val) && dpiScalingOptions.some(opt => opt.value === val)) {
-                    setSelectedDpi(val);
-                    localStorage.setItem("scalingDPI", val.toString());
-                  }
-                } else if (prefixedKey.endsWith("useCssScaling")) {
-                  const clientIsUsingCssScaling = valueStr === true || valueStr === "true";
-                  const correspondingHidpiState = !clientIsUsingCssScaling;
-                  if (hidpiEnabled !== correspondingHidpiState) {
-                    setHidpiEnabled(correspondingHidpiState);
-                    localStorage.setItem("hidpiEnabled", correspondingHidpiState.toString());
-                  }
-                }
-              }
-            }
-          }
         }
       }
     };
@@ -1707,6 +1737,7 @@ function Sidebar({ isOpen }) {
     removeNotification,
     t,
     dynamicEncoderOptions,
+    isOpen,
   ]);
 
   const sidebarClasses = `sidebar ${isOpen ? "is-open" : ""} theme-${theme}`;
@@ -1753,6 +1784,20 @@ function Sidebar({ isOpen }) {
     gaugeRadius,
     gaugeCircumference
   );
+  const MAX_BANDWIDTH_MBPS = 1000;
+  const MAX_LATENCY_MS = 1000;
+  const bandwidthPercent = Math.min(100, (bandwidthMbps / MAX_BANDWIDTH_MBPS) * 100);
+  const bandwidthOffset = calculateGaugeOffset(
+    bandwidthPercent,
+    gaugeRadius,
+    gaugeCircumference
+  );
+  const latencyPercent = Math.min(100, (latencyMs / MAX_LATENCY_MS) * 100);
+  const latencyOffset = calculateGaugeOffset(
+    latencyPercent,
+    gaugeRadius,
+    gaugeCircumference
+  );
   const translatedCommonResolutions = commonResolutionValues.map(
     (value, index) => ({
       value: value,
@@ -1774,6 +1819,8 @@ function Sidebar({ isOpen }) {
   ].includes(encoder);
   const showCRF = ["x264enc-striped", "x264enc"].includes(encoder);
   const showH264Options = ["x264enc-striped", "x264enc"].includes(encoder);
+  const showJpegOptions = encoder === 'jpeg';
+  const showPaintOverQualityToggle = showH264Options || showJpegOptions;
 
   return (
     <>
@@ -1892,6 +1939,55 @@ function Sidebar({ isOpen }) {
           </button>
         </div>
 
+        {(isMobile || hasDetectedTouch) && (
+          <>
+            <div className="sidebar-section-divider"></div>
+            <div className="sidebar-mobile-key-actions">
+              <button
+                className={`mobile-key-button ${heldKeys.Control ? "active" : ""}`}
+                onClick={() => handleHoldKeyClick('Control', 'ControlLeft')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                CTL
+              </button>
+              <button
+                className={`mobile-key-button ${heldKeys.Alt ? "active" : ""}`}
+                onClick={() => handleHoldKeyClick('Alt', 'AltLeft')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                ALT
+              </button>
+              <button
+                className={`mobile-key-button ${heldKeys.Meta ? "active" : ""}`}
+                onClick={() => handleHoldKeyClick('Meta', 'MetaLeft')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                WIN
+              </button>
+              <button
+                className="mobile-key-button"
+                onClick={() => handleOnceKeyClick('Tab', 'Tab')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                TAB
+              </button>
+              <button
+                className="mobile-key-button"
+                onClick={() => handleOnceKeyClick('Escape', 'Escape')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                ESC
+              </button>
+              <button
+                className={`mobile-key-button icon-button ${isKeyboardButtonVisible ? "active" : ""}`}
+                onClick={toggleKeyboardButtonVisibility}
+              >
+                <KeyboardIcon />
+              </button>
+            </div>
+          </>
+        )}
+
         <div className="sidebar-section">
           <div
             className="sidebar-section-header"
@@ -1947,6 +2043,42 @@ function Sidebar({ isOpen }) {
                     onChange={handleFramerateChange}
                   />{" "}
                 </div>
+              )}
+              {showJpegOptions && (
+                <>
+                  <div className="dev-setting-item">
+                    <label htmlFor="jpegQualitySlider">
+                      {t("sections.video.jpegQualityLabel", {
+                        jpegQuality: jpegQuality,
+                      })}
+                    </label>
+                    <input
+                      type="range"
+                      id="jpegQualitySlider"
+                      min="0"
+                      max={jpegQualityOptions.length - 1}
+                      step="1"
+                      value={jpegQualityOptions.indexOf(jpegQuality)}
+                      onChange={handleJpegQualityChange}
+                    />
+                  </div>
+                  <div className="dev-setting-item">
+                    <label htmlFor="paintOverJpegQualitySlider">
+                      {t("sections.video.paintOverJpegQualityLabel", {
+                        paintOverJpegQuality: paintOverJpegQuality,
+                      })}
+                    </label>
+                    <input
+                      type="range"
+                      id="paintOverJpegQualitySlider"
+                      min="0"
+                      max={paintOverJpegQualityOptions.length - 1}
+                      step="1"
+                      value={paintOverJpegQualityOptions.indexOf(paintOverJpegQuality)}
+                      onChange={handlePaintOverJpegQualityChange}
+                    />
+                  </div>
+                </>
               )}
               {showBitrate && (
                 <div className="dev-setting-item">
@@ -2005,6 +2137,40 @@ function Sidebar({ isOpen }) {
                   />{" "}
                 </div>
               )}
+              {showCRF && (
+                <div className="dev-setting-item">
+                  {" "}
+                  <label htmlFor="h264PaintoverCRFSlider">
+                    {t("sections.video.paintoverCrfLabel", { crf: h264PaintoverCRF }, `Paint-Over CRF: ${h264PaintoverCRF}`)}
+                  </label>{" "}
+                  <input
+                    type="range"
+                    id="h264PaintoverCRFSlider"
+                    min="0"
+                    max={videoCRFOptions.length - 1}
+                    step="1"
+                    value={videoCRFOptions.indexOf(h264PaintoverCRF)}
+                    onChange={handleH264PaintoverCRFChange}
+                  />{" "}
+                </div>
+              )}
+              {showPaintOverQualityToggle && (
+                <div className="dev-setting-item toggle-item">
+                  <label htmlFor="usePaintOverQualityToggle">
+                    {t("sections.video.usePaintOverQualityLabel", "Use Paint-Over Quality")}
+                  </label>
+                  <button
+                    id="usePaintOverQualityToggle"
+                    className={`toggle-button-sidebar ${usePaintOverQuality ? "active" : ""}`}
+                    onClick={handleUsePaintOverQualityToggle}
+                    aria-pressed={usePaintOverQuality}
+                    title={t(usePaintOverQuality ? "buttons.usePaintOverQualityDisableTitle" : "buttons.usePaintOverQualityEnableTitle",
+                               usePaintOverQuality ? "Disable Paint-Over Quality" : "Enable Paint-Over Quality")}
+                  >
+                    <span className="toggle-button-sidebar-knob"></span>
+                  </button>
+                </div>
+              )}
               {showH264Options && (
                 <div className="dev-setting-item toggle-item">
                   <label 
@@ -2037,6 +2203,23 @@ function Sidebar({ isOpen }) {
                     aria-pressed={h264FullColor}
                     title={t(h264FullColor ? "buttons.h264FullColorDisableTitle" : "buttons.h264FullColorEnableTitle", 
                                h264FullColor ? "Disable H.264 Full Color" : "Enable H.264 Full Color")}
+                  >
+                    <span className="toggle-button-sidebar-knob"></span>
+                  </button>
+                </div>
+              )}
+              {showH264Options && (
+                <div className="dev-setting-item toggle-item">
+                  <label htmlFor="useCpuToggle">
+                    {t("sections.video.useCpuLabel", "CPU Encoding")}
+                  </label>
+                  <button
+                    id="useCpuToggle"
+                    className={`toggle-button-sidebar ${useCpu ? "active" : ""}`}
+                    onClick={handleUseCpuToggle}
+                    aria-pressed={useCpu}
+                    title={t(useCpu ? "buttons.useCpuDisableTitle" : "buttons.useCpuEnableTitle",
+                               useCpu ? "Disable CPU Encoding" : "Enable CPU Encoding")}
                   >
                     <span className="toggle-button-sidebar-knob"></span>
                   </button>
@@ -2173,6 +2356,21 @@ function Sidebar({ isOpen }) {
                   <span className="toggle-button-sidebar-knob"></span>
                 </button>
               </div>
+              <div className="dev-setting-item toggle-item">
+                <label htmlFor="antiAliasingToggle">
+                  {t("sections.screen.antiAliasingLabel", "Anti-aliasing")}
+                </label>
+                <button
+                  id="antiAliasingToggle"
+                  className={`toggle-button-sidebar ${antiAliasing ? "active" : ""}`}
+                  onClick={handleAntiAliasingToggle}
+                  aria-pressed={antiAliasing}
+                  title={t(antiAliasing ? "sections.screen.antiAliasingDisableTitle" : "sections.screen.antiAliasingEnableTitle",
+                             antiAliasing ? "Disable anti-aliasing (force pixelated)" : "Enable anti-aliasing (smooth on scaling)")}
+                >
+                  <span className="toggle-button-sidebar-knob"></span>
+                </button>
+              </div>
               <div className="dev-setting-item">
                 <label htmlFor="uiScalingSelect">
                   {t("sections.screen.uiScalingLabel", "UI Scaling")}
@@ -2184,7 +2382,9 @@ function Sidebar({ isOpen }) {
                 >
                   {dpiScalingOptions.map((option) => (
                     <option key={option.value} value={option.value}>
-                      {option.label}
+                      {option.value === currentDeviceDpi
+                        ? `${option.label} *`
+                        : option.label}
                     </option>
                   ))}
                 </select>
@@ -2356,60 +2556,6 @@ function Sidebar({ isOpen }) {
                 </div>
                 <div
                   className="gauge-container"
-                  onMouseEnter={(e) => handleMouseEnter(e, "gpu")}
-                  onMouseLeave={handleMouseLeave}
-                >
-                  {" "}
-                  <svg
-                    width={gaugeSize}
-                    height={gaugeSize}
-                    viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                  >
-                    {" "}
-                    <circle
-                      stroke="var(--item-border)"
-                      fill="transparent"
-                      strokeWidth={gaugeStrokeWidth}
-                      r={gaugeRadius}
-                      cx={gaugeCenter}
-                      cy={gaugeCenter}
-                    />{" "}
-                    <circle
-                      stroke="var(--sidebar-header-color)"
-                      fill="transparent"
-                      strokeWidth={gaugeStrokeWidth}
-                      r={gaugeRadius}
-                      cx={gaugeCenter}
-                      cy={gaugeCenter}
-                      transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                      style={{
-                        strokeDasharray: gaugeCircumference,
-                        strokeDashoffset: gpuOffset,
-                        transition: "stroke-dashoffset 0.3s ease-in-out",
-                        strokeLinecap: "round",
-                      }}
-                    />{" "}
-                    <text
-                      x={gaugeCenter}
-                      y={gaugeCenter}
-                      textAnchor="middle"
-                      dominantBaseline="central"
-                      fontSize={`${gaugeSize / 5}px`}
-                      fill="var(--sidebar-text)"
-                      fontWeight="bold"
-                    >
-                      {" "}
-                      {Math.round(
-                        Math.max(0, Math.min(100, gpuPercent || 0))
-                      )}%{" "}
-                    </text>{" "}
-                  </svg>{" "}
-                  <div className="gauge-label">
-                    {t("sections.stats.gpuLabel")}
-                  </div>{" "}
-                </div>
-                <div
-                  className="gauge-container"
                   onMouseEnter={(e) => handleMouseEnter(e, "sysmem")}
                   onMouseLeave={handleMouseLeave}
                 >
@@ -2463,61 +2609,115 @@ function Sidebar({ isOpen }) {
                     {t("sections.stats.sysMemLabel")}
                   </div>{" "}
                 </div>
-                <div
-                  className="gauge-container"
-                  onMouseEnter={(e) => handleMouseEnter(e, "gpumem")}
-                  onMouseLeave={handleMouseLeave}
-                >
-                  {" "}
-                  <svg
-                    width={gaugeSize}
-                    height={gaugeSize}
-                    viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                  >
-                    {" "}
-                    <circle
-                      stroke="var(--item-border)"
-                      fill="transparent"
-                      strokeWidth={gaugeStrokeWidth}
-                      r={gaugeRadius}
-                      cx={gaugeCenter}
-                      cy={gaugeCenter}
-                    />{" "}
-                    <circle
-                      stroke="var(--sidebar-header-color)"
-                      fill="transparent"
-                      strokeWidth={gaugeStrokeWidth}
-                      r={gaugeRadius}
-                      cx={gaugeCenter}
-                      cy={gaugeCenter}
-                      transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                      style={{
-                        strokeDasharray: gaugeCircumference,
-                        strokeDashoffset: gpuMemOffset,
-                        transition: "stroke-dashoffset 0.3s ease-in-out",
-                        strokeLinecap: "round",
-                      }}
-                    />{" "}
-                    <text
-                      x={gaugeCenter}
-                      y={gaugeCenter}
-                      textAnchor="middle"
-                      dominantBaseline="central"
-                      fontSize={`${gaugeSize / 5}px`}
-                      fill="var(--sidebar-text)"
-                      fontWeight="bold"
+                {window.gpu_stats && (
+                  <>
+                    <div
+                      className="gauge-container"
+                      onMouseEnter={(e) => handleMouseEnter(e, "gpu")}
+                      onMouseLeave={handleMouseLeave}
                     >
-                      {" "}
-                      {Math.round(
-                        Math.max(0, Math.min(100, gpuMemPercent || 0))
-                      )}
-                      %{" "}
-                    </text>{" "}
-                  </svg>{" "}
-                  <div className="gauge-label">
-                    {t("sections.stats.gpuMemLabel")}
-                  </div>{" "}
-                </div>
+                       <svg
+                        width={gaugeSize}
+                        height={gaugeSize}
+                        viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
+                      >
+                        <circle
+                          stroke="var(--item-border)"
+                          fill="transparent"
+                          strokeWidth={gaugeStrokeWidth}
+                          r={gaugeRadius}
+                          cx={gaugeCenter}
+                          cy={gaugeCenter}
+                        />
+                        <circle
+                          stroke="var(--sidebar-header-color)"
+                          fill="transparent"
+                          strokeWidth={gaugeStrokeWidth}
+                          r={gaugeRadius}
+                          cx={gaugeCenter}
+                          cy={gaugeCenter}
+                          transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
+                          style={{
+                            strokeDasharray: gaugeCircumference,
+                            strokeDashoffset: gpuOffset,
+                            transition: "stroke-dashoffset 0.3s ease-in-out",
+                            strokeLinecap: "round",
+                          }}
+                        />
+                        <text
+                          x={gaugeCenter}
+                          y={gaugeCenter}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fontSize={`${gaugeSize / 5}px`}
+                          fill="var(--sidebar-text)"
+                          fontWeight="bold"
+                        >
+                          {" "}
+                          {Math.round(
+                            Math.max(0, Math.min(100, gpuPercent || 0))
+                          )}%{" "}
+                        </text>
+                      </svg>
+                      <div className="gauge-label">
+                        {t("sections.stats.gpuLabel")}
+                      </div>
+                    </div>
+                    <div
+                      className="gauge-container"
+                      onMouseEnter={(e) => handleMouseEnter(e, "gpumem")}
+                      onMouseLeave={handleMouseLeave}
+                    >
+                       <svg
+                        width={gaugeSize}
+                        height={gaugeSize}
+                        viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
+                      >
+                        <circle
+                          stroke="var(--item-border)"
+                          fill="transparent"
+                          strokeWidth={gaugeStrokeWidth}
+                          r={gaugeRadius}
+                          cx={gaugeCenter}
+                          cy={gaugeCenter}
+                        />
+                        <circle
+                          stroke="var(--sidebar-header-color)"
+                          fill="transparent"
+                          strokeWidth={gaugeStrokeWidth}
+                          r={gaugeRadius}
+                          cx={gaugeCenter}
+                          cy={gaugeCenter}
+                          transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
+                          style={{
+                            strokeDasharray: gaugeCircumference,
+                            strokeDashoffset: gpuMemOffset,
+                            transition: "stroke-dashoffset 0.3s ease-in-out",
+                            strokeLinecap: "round",
+                          }}
+                        />
+                        <text
+                          x={gaugeCenter}
+                          y={gaugeCenter}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fontSize={`${gaugeSize / 5}px`}
+                          fill="var(--sidebar-text)"
+                          fontWeight="bold"
+                        >
+                          {" "}
+                          {Math.round(
+                            Math.max(0, Math.min(100, gpuMemPercent || 0))
+                          )}
+                          %{" "}
+                        </text>
+                      </svg>
+                      <div className="gauge-label">
+                        {t("sections.stats.gpuMemLabel")}
+                      </div>
+                    </div>
+                  </>
+                )}
                 <div
                   className="gauge-container"
                   onMouseEnter={(e) => handleMouseEnter(e, "fps")}
@@ -2620,6 +2820,110 @@ function Sidebar({ isOpen }) {
                   </svg>{" "}
                   <div className="gauge-label">
                     {t("sections.stats.audioLabel")}
+                  </div>{" "}
+                </div>
+                <div
+                  className="gauge-container"
+                  onMouseEnter={(e) => handleMouseEnter(e, "bandwidth")}
+                  onMouseLeave={handleMouseLeave}
+                >
+                  {" "}
+                  <svg
+                    width={gaugeSize}
+                    height={gaugeSize}
+                    viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
+                  >
+                    {" "}
+                    <circle
+                      stroke="var(--item-border)"
+                      fill="transparent"
+                      strokeWidth={gaugeStrokeWidth}
+                      r={gaugeRadius}
+                      cx={gaugeCenter}
+                      cy={gaugeCenter}
+                    />{" "}
+                    <circle
+                      stroke="var(--sidebar-header-color)"
+                      fill="transparent"
+                      strokeWidth={gaugeStrokeWidth}
+                      r={gaugeRadius}
+                      cx={gaugeCenter}
+                      cy={gaugeCenter}
+                      transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
+                      style={{
+                        strokeDasharray: gaugeCircumference,
+                        strokeDashoffset: bandwidthOffset,
+                        transition: "stroke-dashoffset 0.3s ease-in-out",
+                        strokeLinecap: "round",
+                      }}
+                    />{" "}
+                    <text
+                      x={gaugeCenter}
+                      y={gaugeCenter}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontSize={`${gaugeSize / 5}px`}
+                      fill="var(--sidebar-text)"
+                      fontWeight="bold"
+                    >
+                      {" "}
+                      {Math.round(bandwidthMbps)}{" "}
+                    </text>{" "}
+                  </svg>{" "}
+                  <div className="gauge-label">
+                    {t("sections.stats.bandwidthLabel", "Bandwidth")}
+                  </div>{" "}
+                </div>
+                <div
+                  className="gauge-container"
+                  onMouseEnter={(e) => handleMouseEnter(e, "latency")}
+                  onMouseLeave={handleMouseLeave}
+                >
+                  {" "}
+                  <svg
+                    width={gaugeSize}
+                    height={gaugeSize}
+                    viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
+                  >
+                    {" "}
+                    <circle
+                      stroke="var(--item-border)"
+                      fill="transparent"
+                      strokeWidth={gaugeStrokeWidth}
+                      r={gaugeRadius}
+                      cx={gaugeCenter}
+                      cy={gaugeCenter}
+                    />{" "}
+                    <circle
+                      stroke="var(--sidebar-header-color)"
+                      fill="transparent"
+                      strokeWidth={gaugeStrokeWidth}
+                      r={gaugeRadius}
+                      cx={gaugeCenter}
+                      cy={gaugeCenter}
+                      transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
+                      style={{
+                        strokeDasharray: gaugeCircumference,
+                        strokeDashoffset: latencyOffset,
+                        transition: "stroke-dashoffset 0.3s ease-in-out",
+                        strokeLinecap: "round",
+                      }}
+                    />{" "}
+                    <text
+                      x={gaugeCenter}
+                      y={gaugeCenter}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontSize={`${gaugeSize / 5}px`}
+                      fill="var(--sidebar-text)"
+                      fontWeight="bold"
+                    >
+                      {" "}
+                      {Math.round(latencyMs)}{" "}
+                    </text>{" "}
+                  </svg>{" "}
+                  <div className="gauge-label">
+                    {t("sections.stats.latencyLabel", "Latency")}
                   </div>{" "}
                 </div>
               </div>
@@ -3000,7 +3304,7 @@ function Sidebar({ isOpen }) {
         <AppsModal isOpen={isAppsModalOpen} onClose={toggleAppsModal} t={t} />
       )}
 
-      {(isMobile || hasDetectedTouch) && (
+      {(isMobile || hasDetectedTouch) && isKeyboardButtonVisible && (
         <button
           className={`virtual-keyboard-button theme-${theme} allow-native-input`}
           onClick={onKeyboardButtonClick}

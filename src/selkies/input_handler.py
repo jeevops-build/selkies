@@ -755,7 +755,7 @@ class SelkiesGamepad:
         logger_selkies_gamepad.info(f"Gamepad services fully closed.")
 
 
-# --- WebRTCInput Class (Modified for new Gamepad handling) ---
+# --- WebRTCInput Class ---
 class WebRTCInputError(Exception): pass
 
 class WebRTCInput:
@@ -769,14 +769,23 @@ class WebRTCInput:
         cursor_size=16, 
         cursor_scale=1.0,
         cursor_debug=False,
+        max_cursor_size=32,
     ):
         self.active_shortcut_modifiers = set()
-        self.typed_keys_to_ignore_keyup = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
             'Control_L', 'Control_R', 
             'Alt_L', 'Alt_R', 
             'Super_L', 'Super_R',
             'Meta_L', 'Meta_R'
+        }
+        self.active_modifiers = set()
+        self.atomically_typed_keys = set()
+        self.MODIFIER_KEYSYMS = {
+            65505, 65506,  # Shift_L, Shift_R
+            65507, 65508,  # Control_L, Control_R
+            65513, 65514,  # Alt_L, Alt_R
+            65027,        # ISO_Level3_Shift (AltGr)
+            65511, 65512,  # Meta_L, Meta_R / Super_L, Super_R
         }
         self.gst_webrtc_app = gst_webrtc_app
         self.loop = asyncio.get_event_loop()
@@ -791,10 +800,12 @@ class WebRTCInput:
         self.enable_clipboard = enable_clipboard
         self.enable_cursors = enable_cursors
         self.cursors_running = False
-        self.cursor_cache = {}
         self.cursor_scale = cursor_scale
         self.cursor_size = cursor_size
         self.cursor_debug = cursor_debug
+        self.max_cursor_size = max_cursor_size
+        self.system_dpi = 96.0
+        self.cursor_size_cap = max_cursor_size
         self.keyboard = None
         self.mouse = None
         self.xdisplay = None
@@ -898,6 +909,23 @@ class WebRTCInput:
     async def connect(self):
         try: self.xdisplay = display.Display()
         except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
+        if self.xdisplay:
+            try:
+                screen = self.xdisplay.screen()
+                width_mm = screen.width_in_mms
+                height_mm = screen.height_in_mms
+                if width_mm > 0 and height_mm > 0:
+                    dpi_x = (screen.width_in_pixels * 25.4) / width_mm
+                    dpi_y = (screen.height_in_pixels * 25.4) / height_mm
+                    self.system_dpi = (dpi_x + dpi_y) / 2.0
+                dpi_scale_factor = self.system_dpi / 96.0
+                self.cursor_size_cap = int(self.max_cursor_size * dpi_scale_factor)
+                logger_webrtc_input.info(
+                    f"System DPI detected as ~{self.system_dpi:.0f}. "
+                    f"Cursor size cap set to {self.cursor_size_cap}x{self.cursor_size_cap}px."
+                )
+            except Exception as e:
+                logger_webrtc_input.warning(f"Could not determine system DPI, using default 96. Error: {e}")
         self.__keyboard_connect()
         if self.xdisplay: await self.reset_keyboard()
         self.__mouse_connect()
@@ -976,6 +1004,10 @@ class WebRTCInput:
         elif action == MOUSE_SCROLL_DOWN:
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, -1)
             elif self.mouse: self.mouse.scroll(0, 1)
+        elif action == MOUSE_SCROLL_LEFT:
+            if self.mouse: self.mouse.scroll(-1, 0)
+        elif action == MOUSE_SCROLL_RIGHT:
+            if self.mouse: self.mouse.scroll(1, 0)
         elif action == MOUSE_BUTTON: 
             btn_map_key = "uinput" if self.uinput_mouse_socket_path else "pynput"
             btn_uinput_or_pynput = MOUSE_BUTTON_MAP[data[1]][btn_map_key]
@@ -987,59 +1019,61 @@ class WebRTCInput:
                 elif self.mouse: self.mouse.release(btn_uinput_or_pynput)
 
     async def send_x11_keypress(self, keysym, down=True):
-        if not down and keysym in self.typed_keys_to_ignore_keyup:
-            self.typed_keys_to_ignore_keyup.remove(keysym)
-            return
-        map_entry = X11_KEYSYM_MAP.get(keysym)
-        if map_entry:
-            xkey_name = map_entry.get('xkey_name')
-            if xkey_name and xkey_name in self.SHORTCUT_MODIFIER_XKEY_NAMES:
-                if down:
-                    self.active_shortcut_modifiers.add(xkey_name)
-                else:
-                    try: self.active_shortcut_modifiers.remove(xkey_name)
-                    except KeyError: pass
-        is_printable = False
-        char_to_type = None
-        try:
-            if (0x20 <= keysym <= 0x7E) or (0xA0 <= keysym <= 0xFF):
-                char_to_type = chr(keysym)
-                is_printable = True
-            elif (keysym & 0xFF000000) == 0x01000000:
-                unicode_codepoint = keysym & 0x00FFFFFF
-                char_to_type = chr(unicode_codepoint)
-                is_printable = True
-        except (ValueError, TypeError):
-            is_printable = False
-        if is_printable and down and not self.active_shortcut_modifiers:
+        is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
+        action = "keydown" if down else "keyup"
+        command = None
+        use_pynput_for_printable = False
+        if is_printable:
+            unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
             try:
-                command = ["xdotool", "type", "--clearmodifiers", char_to_type]
-                process = await subprocess.create_subprocess_exec(
-                    *command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=0.5)
-                if process.returncode == 0:
-                    self.typed_keys_to_ignore_keyup.add(keysym)
-                    logger_webrtc_input.debug(f"Typed character '{char_to_type}' via xdotool type.")
-                    return
+                char = chr(unicode_codepoint)
+                if char.isalpha():
+                    use_pynput_for_printable = True
                 else:
-                    raise Exception(f"xdotool returned {process.returncode}: {stderr.decode()}")
-            except (asyncio.TimeoutError, FileNotFoundError, Exception) as e:
-                logger_webrtc_input.warning(f"xdotool type command failed for '{char_to_type}': {e}. Falling back.")
-        try:
-            if not self.keyboard:
-                await self._xdotool_fallback(keysym, down)
-                return
+                    xdotool_arg = f"U{unicode_codepoint:04X}"
+                    if not self.active_shortcut_modifiers:
+                        command = ["xdotool", action, "--clearmodifiers", xdotool_arg]
+                    else:
+                        command = ["xdotool", action, xdotool_arg]
+            except ValueError:
+                use_pynput_for_printable = True
 
-            pynput_key = pynput.keyboard.KeyCode.from_vk(keysym)
-            if down:
-                self.keyboard.press(pynput_key)
-            else:
-                self.keyboard.release(pynput_key)
-        except Exception:
-            await self._xdotool_fallback(keysym, down)
+        else:
+            map_entry = X11_KEYSYM_MAP.get(keysym)
+            if map_entry:
+                xdotool_arg = map_entry.get('xkey_name')
+                if xdotool_arg:
+                    command = ["xdotool", action, xdotool_arg]
+                    if xdotool_arg in self.SHORTCUT_MODIFIER_XKEY_NAMES:
+                        if down:
+                            self.active_shortcut_modifiers.add(xdotool_arg)
+                        else:
+                            self.active_shortcut_modifiers.discard(xdotool_arg)
+
+        if command:
+            try:
+                process = await subprocess.create_subprocess_exec(
+                    *command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                await asyncio.wait_for(process.communicate(), timeout=0.5)
+                if process.returncode == 0:
+                    return
+            except Exception:
+                pass
+
+        if use_pynput_for_printable or not command:
+            try:
+                if not self.keyboard:
+                    await self._xdotool_fallback(keysym, down)
+                    return
+                
+                pynput_key = pynput.keyboard.KeyCode.from_vk(keysym)
+                if down:
+                    self.keyboard.press(pynput_key)
+                else:
+                    self.keyboard.release(pynput_key)
+            except Exception:
+                await self._xdotool_fallback(keysym, down)
 
     async def _xdotool_fallback(self, keysym_number, down=True):
         if not self.xdisplay:
@@ -1131,7 +1165,7 @@ class WebRTCInput:
             self.send_mouse(MOUSE_POSITION, (x, y))
 
         if button_mask != self.button_mask:
-            for bit_index in range(5): # Check bits 0 through 4
+            for bit_index in range(8): # Check bits 0 through 7
                 current_button_bit_value = (1 << bit_index)
                 button_state_changed = ((self.button_mask & current_button_bit_value) != \
                                         (button_mask & current_button_bit_value))
@@ -1186,6 +1220,14 @@ class WebRTCInput:
                                     performed_keyboard_combo = True
                                 else:
                                     logger_webrtc_input.warning("Keyboard not available for Alt+Right.")
+                    elif bit_index == 6:
+                        if scroll_magnitude > 0 and is_pressed_now:
+                            action_to_send = MOUSE_SCROLL_LEFT
+                            is_scroll_action = True
+                    elif bit_index == 7:
+                        if scroll_magnitude > 0 and is_pressed_now:
+                            action_to_send = MOUSE_SCROLL_RIGHT
+                            is_scroll_action = True
                     # Send the determined MOUSE action (if any and no keyboard combo was done)
                     if not performed_keyboard_combo and action_to_send is not None:
                         if is_scroll_action:
@@ -1253,14 +1295,11 @@ class WebRTCInput:
                 return
         xfixes_version = self.xdisplay.xfixes_query_version()
         logger_webrtc_input.info(
-            "Found XFIXES version %s.%s"
-            % (
-                xfixes_version.major_version,
-                xfixes_version.minor_version,
-            )
+            "Found XFIXES version %s.%s",
+            xfixes_version.major_version,
+            xfixes_version.minor_version,
         )
         logger_webrtc_input.info("starting cursor monitor")
-        self.cursor_cache = {}
         self.cursors_running = True
         screen = self.xdisplay.screen()
         self.xdisplay.xfixes_select_cursor_input(
@@ -1268,97 +1307,80 @@ class WebRTCInput:
         )
         logger_webrtc_input.info("watching for cursor changes")
         try:
-            image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-            self.cursor_cache[image.cursor_serial] = self.cursor_to_msg(
-                image, self.cursor_scale, self.cursor_size
-            )
-            self.on_cursor_change(self.cursor_cache[image.cursor_serial])
+            cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
+            cursor_data = self.cursor_to_msg(cursor_image)
+            self.on_cursor_change(cursor_data)
         except Exception as e:
-            logger_webrtc_input.warning("exception from fetching cursor image: %s" % e)
+            logger_webrtc_input.warning("exception from fetching initial cursor image: %s", e)
+            
         while self.cursors_running:
             if self.xdisplay.pending_events() == 0:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.02)
                 continue
+            
             event = self.xdisplay.next_event()
             if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
-                cache_key = event.cursor_serial
-                if cache_key in self.cursor_cache:
-                    pass
-                else:
-                    try:
-                        cursor = self.xdisplay.xfixes_get_cursor_image(screen.root)
-                        self.cursor_cache[cache_key] = self.cursor_to_msg(
-                            cursor, self.cursor_scale, self.cursor_size
-                        )
-                    except Exception as e:
-                        logger_webrtc_input.warning(
-                            "exception from fetching cursor image: %s" % e
-                        )
-                self.on_cursor_change(self.cursor_cache.get(cache_key))
+                try:
+                    cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
+                    cursor_data = self.cursor_to_msg(cursor_image)
+                    self.on_cursor_change(cursor_data)
+                except Exception as e:
+                    logger_webrtc_input.warning(
+                        "exception from fetching cursor image on change: %s", e
+                    )
         logger_webrtc_input.info("cursor monitor stopped")
+
     def stop_cursor_monitor(self):
         logger_webrtc_input.info("stopping cursor monitor")
         self.cursors_running = False
 
-    def cursor_to_msg(self, cursor, scale=1.0, cursor_size=32):
-        if cursor.width == 0 or cursor.height == 0:
+    def _cursor_image_to_pil(self, cursor):
+        byte_data = b''.join(p.to_bytes(4, 'little') for p in cursor.cursor_image)
+        return Image.frombytes("RGBA", (cursor.width, cursor.height), byte_data, "raw", "BGRA")
+
+    def cursor_to_msg(self, cursor):
+        if not cursor or cursor.width == 0 or cursor.height == 0:
             return {
-                "curdata": "", "handle": cursor.cursor_serial,
-                "override": "none", "hotspot": {"x": 0, "y": 0},
+                "curdata": "", "width": 0, "height": 0,
+                "hotx": 0, "hoty": 0, "handle": cursor.cursor_serial if cursor else 0,
             }
-
-        target_canvas_size = cursor_size
-        target_hotspot = (target_canvas_size // 2, target_canvas_size // 2)
-
-        source_width = cursor.width
-        source_height = cursor.height
-        source_hotspot_x = cursor.xhot
-        source_hotspot_y = cursor.yhot
-
-        max_dim = max(source_width, source_height)
-        if max_dim > target_canvas_size:
-            scale_factor = target_canvas_size / max_dim
-            source_width = int(source_width * scale_factor)
-            source_height = int(source_height * scale_factor)
-            source_hotspot_x = int(source_hotspot_x * scale_factor)
-            source_hotspot_y = int(source_hotspot_y * scale_factor)
-        
-        paste_x = target_hotspot[0] - source_hotspot_x
-        paste_y = target_hotspot[1] - source_hotspot_y
-
-        png_data = self.cursor_to_png(
-            cursor, 
-            (source_width, source_height), 
-            (paste_x, paste_y),
-            (target_canvas_size, target_canvas_size)
-        )
-
+        im = self._cursor_image_to_pil(cursor)
+        bbox = im.getbbox()
+        if bbox is None:
+            return {
+                "curdata": "", "width": 0, "height": 0,
+                "hotx": 0, "hoty": 0, "handle": cursor.cursor_serial,
+            }
+        cropped_im = im.crop(bbox)
+        left, upper, right, lower = bbox
+        new_hotx = cursor.xhot - left
+        new_hoty = cursor.yhot - upper
+        if cropped_im.width > self.cursor_size_cap or cropped_im.height > self.cursor_size_cap:
+            if self.cursor_debug:
+                logger_webrtc_input.info(f"Cursor ({cropped_im.width}x{cropped_im.height}) exceeds cap ({self.cursor_size_cap}x{self.cursor_size_cap}). Resizing.")
+            max_dim = max(cropped_im.width, cropped_im.height)
+            scale_factor = self.cursor_size_cap / max_dim
+            new_width = int(cropped_im.width * scale_factor)
+            new_height = int(cropped_im.height * scale_factor)
+            try:
+                resampling_filter = Image.Resampling.LANCZOS
+            except AttributeError:
+                resampling_filter = Image.LANCZOS
+            cropped_im = cropped_im.resize((new_width, new_height), resample=resampling_filter)
+            new_hotx = int(new_hotx * scale_factor)
+            new_hoty = int(new_hoty * scale_factor)
+        with io.BytesIO() as f:
+            cropped_im.save(f, "PNG")
+            png_data = f.getvalue()
         png_data_b64 = base64.b64encode(png_data)
-        override = None
-        if sum(cursor.cursor_image) == 0:
-            override = "none"
-            
         return {
             "curdata": png_data_b64.decode(),
+            "width": cropped_im.width,
+            "height": cropped_im.height,
+            "hotx": new_hotx,
+            "hoty": new_hoty,
             "handle": cursor.cursor_serial,
-            "override": override,
-            "hotspot": {
-                "x": target_hotspot[0],
-                "y": target_hotspot[1],
-            },
         }
-
-    def cursor_to_png(self, cursor, resize_dim, paste_pos, canvas_dim):
-        with io.BytesIO() as f:
-            s = [((i >> b) & 0xFF) for i in cursor.cursor_image for b in [16, 8, 0, 24]]
-            im = Image.frombytes("RGBA", (cursor.width, cursor.height), bytes(s), "raw", "BGRA")
-            if im.size != resize_dim:
-                im = im.resize(resize_dim, Image.Resampling.LANCZOS)
-            final_im = Image.new("RGBA", canvas_dim, (0, 0, 0, 0))
-            final_im.paste(im, paste_pos, im if im.mode == 'RGBA' else None)
-            final_im.save(f, "PNG")
-            data = f.getvalue()
-            return data
 
     async def stop_gamepad_servers(self):
         logger_webrtc_input.info("Stopping all gamepad instances.")
@@ -1371,8 +1393,35 @@ class WebRTCInput:
         if msg_type == "pong":
             if self.ping_start is None: logger_webrtc_input.warning("received pong before ping"); return
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
-        elif msg_type == "kd": await self.send_x11_keypress(int(toks[1]), down=True)
-        elif msg_type == "ku": await self.send_x11_keypress(int(toks[1]), down=False)
+        elif msg_type == "kd":
+            keysym = int(toks[1])
+            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
+            if keysym in self.MODIFIER_KEYSYMS:
+                self.active_modifiers.add(keysym)
+            if is_printable and not self.active_modifiers:
+                unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
+                try:
+                    char_to_type = chr(unicode_codepoint)
+                    if not char_to_type.isalpha():
+                        logger_webrtc_input.debug(f"Handling non-alpha '{char_to_type}' with atomic 'type' to prevent stuck modifiers.")
+                        await self.on_message(f"co,end,{char_to_type}")
+                        self.atomically_typed_keys.add(keysym)
+                    else:
+                        await self.send_x11_keypress(keysym, down=True)
+                except (ValueError, TypeError):
+                    await self.send_x11_keypress(keysym, down=True)
+            else:
+                await self.send_x11_keypress(keysym, down=True)
+        elif msg_type == "ku":
+            keysym = int(toks[1])
+            
+            if keysym in self.MODIFIER_KEYSYMS:
+                self.active_modifiers.discard(keysym)
+            if keysym in self.atomically_typed_keys:
+                self.atomically_typed_keys.discard(keysym)
+                pass
+            else:
+                await self.send_x11_keypress(keysym, down=False)
         elif msg_type == "kr": await self.reset_keyboard()
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
@@ -1485,10 +1534,11 @@ class WebRTCInput:
         elif msg_type in ["_stats_video", "_stats_audio"]: 
             try: await self.on_client_webrtc_stats(msg_type, ",".join(toks[1:]))
             except: logger_webrtc_input.error("Failed to parse WebRTC Statistics")
-        elif msg_type == "co" and toks[1] == "end" and len(toks) > 2: 
+        elif msg_type == "co" and toks[1] == "end": 
             try:
+                text_to_type = msg[7:]
                 process = await subprocess.create_subprocess_exec(
-                    "xdotool", "type", toks[2],
+                    "xdotool", "type", text_to_type,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE
                 )
@@ -1503,6 +1553,8 @@ MOUSE_POSITION = 10
 MOUSE_MOVE = 11
 MOUSE_SCROLL_UP = 20
 MOUSE_SCROLL_DOWN = 21
+MOUSE_SCROLL_LEFT = 22
+MOUSE_SCROLL_RIGHT = 23
 MOUSE_BUTTON_PRESS = 30
 MOUSE_BUTTON_RELEASE = 31
 MOUSE_BUTTON = 40

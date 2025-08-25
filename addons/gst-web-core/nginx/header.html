@@ -21,29 +21,25 @@
             --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             --border-radius: 8px;
         }
-
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-
         body {
             font-family: var(--font-family);
             background-color: var(--page-bg);
             color: var(--text-color);
             line-height: 1.6;
-            padding-top: 20px; /* Existing top padding */
+            padding-top: 20px;
             padding-bottom: 60px;
         }
-
         .page-container {
             max-width: var(--container-max-width);
             margin: 0 auto;
-            padding: 0 20px; /* Existing horizontal padding */
-            position: relative; /* Needed for absolute positioning of the reload button */
+            padding: 0 20px;
+            position: relative;
         }
-
         h1 {
             color: var(--header-color);
             font-size: 2em;
@@ -51,14 +47,11 @@
             margin-bottom: 15px;
             padding-bottom: 15px;
             border-bottom: 1px solid var(--border-color);
-            /* Ensure H1 doesn't overlap with absolutely positioned button if text is long */
-            padding-right: 50px; /* Space for the reload button */
+            padding-right: 50px;
         }
-
         hr {
             display: none;
         }
-
         table {
             width: 100%;
             border-collapse: collapse;
@@ -68,11 +61,9 @@
             overflow: hidden;
             box-shadow: 0 4px 10px var(--shadow-color);
         }
-
         thead {
             background-color: var(--table-header-bg);
         }
-
         th {
             color: var(--header-color);
             font-weight: 600;
@@ -80,25 +71,20 @@
             font-size: 0.85em;
             letter-spacing: 0.05em;
         }
-
         th, td {
             padding: 12px 15px;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
         }
-
         tbody tr {
             transition: background-color 0.2s ease-in-out;
         }
-
         tbody tr:hover {
             background-color: var(--table-row-hover-bg);
         }
-
         tbody tr:last-child td {
             border-bottom: none;
         }
-
         td a {
             color: var(--link-color);
             text-decoration: none;
@@ -106,63 +92,50 @@
             align-items: center;
             transition: color 0.2s ease-in-out;
         }
-
         td a:hover {
             color: var(--link-hover-color);
             text-decoration: underline;
         }
-        
         th a {
             color: var(--link-color);
             text-decoration: none;
             transition: color 0.2s ease-in-out;
         }
-
         th a:hover {
             color: var(--link-hover-color);
             text-decoration: underline;
         }
-
         th a:visited {
             color: var(--link-color);
         }
-        
         th a:visited:hover {
             color: var(--link-hover-color);
         }
-
-        /* Styles for the Reload Button */
         #reload-page-button {
             position: absolute;
-            /* Align with body's top padding and page-container's right padding */
-            top: 0; /* Aligns with the top of the H1 content */
-            right: 0; /* Aligns to the right padding edge of .page-container */
-            background-color: transparent; /* Make it less obtrusive */
-            color: var(--text-color); /* Icon color, can be --link-color too */
+            top: 0;
+            right: 0;
+            background-color: transparent;
+            color: var(--text-color);
             border: none;
             border-radius: var(--border-radius);
-            padding: 8px; /* Clickable area */
+            padding: 8px;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
             justify-content: center;
             transition: color 0.2s ease-in-out, transform 0.2s ease-in-out;
-            z-index: 10; /* Ensure it's above other elements if any overlap */
+            z-index: 10;
         }
-
         #reload-page-button:hover {
-            color: var(--link-hover-color); /* Brighter on hover */
-            transform: rotate(45deg); /* Simple hover effect */
+            color: var(--link-hover-color);
+            transform: rotate(45deg);
         }
-
         #reload-page-button svg {
-            width: 20px; /* Icon size */
+            width: 20px;
             height: 20px;
-            fill: currentColor; /* Icon inherits button's text color */
+            fill: currentColor;
         }
-        /* End of Reload Button Styles */
-
-        /* Column-specific styling */
         td:nth-child(1) {
             word-break: break-all;
         }
@@ -177,7 +150,6 @@
             white-space: nowrap;
             width: 100px;
         }
-
         td a::before {
             display: inline-block;
             content: '';
@@ -190,19 +162,15 @@
             background-position: center;
             flex-shrink: 0;
         }
-
         td a[href="../"]::before {
             background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>');
         }
-
         td a[href$="/"]:not([href="../"])::before {
             background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>');
         }
-
         td a:not([href$="/"]):not([href="../"])::before {
             background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M14 2H6c-1.11 0-2 .9-2 2v16c0 1.1.89 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>');
         }
-
         footer {
             text-align: center;
             margin-top: 40px;
@@ -212,52 +180,42 @@
             color: var(--text-color);
             opacity: 0.7;
         }
-
         footer p {
             margin: 0;
         }
-
         @media (max-width: 768px) {
             body {
                 font-size: 14px;
                 padding-top: 10px;
                 padding-bottom: 40px;
             }
-
             .page-container {
                 padding: 0 10px;
             }
-
             h1 {
                 font-size: 1.6em;
-                padding-right: 40px; /* Adjust for smaller screens */
+                padding-right: 40px;
             }
-
             #reload-page-button {
-                top: -2px; /* Fine-tune for smaller screens if needed */
+                top: -2px;
                 right: 0px;
             }
-
             #reload-page-button svg {
                 width: 18px;
                 height: 18px;
             }
-
             th, td {
                 padding: 10px 8px;
             }
-
             table {
                 display: block;
                 overflow-x: auto;
                 white-space: nowrap;
                 -webkit-overflow-scrolling: touch;
             }
-
             th, td {
                 white-space: nowrap;
             }
-            
             td:nth-child(1) {
                 min-width: 200px;
             }
@@ -281,4 +239,3 @@
         </button>
 
         <h1>
-        <!-- Nginx fancyindex module will insert its H1 content (e.g., "Index of /files/"), then HR, and TABLE *after* this H1 element -->

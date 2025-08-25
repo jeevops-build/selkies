@@ -17,7 +17,6 @@ TARGET_FRAMERATE = 60
 TARGET_VIDEO_BITRATE_KBPS = 16000
 MIN_VIDEO_BITRATE_KBPS = 500
 
-DATA_WEBSOCKET_PORT = 8082
 UINPUT_MOUSE_SOCKET = ""
 JS_SOCKET_PATH = "/tmp"
 ENABLE_CLIPBOARD = True
@@ -175,9 +174,6 @@ class SelkiesStreamingApp:
             )
 
     def send_ws_cursor_data(self, data):
-        if len(data.get("curdata") or "") < 200:
-            data_logger.debug("Detected 'hide on typing' cursor state. Ignoring update.")
-            return
         self.last_cursor_sent = data
         if (
             self.data_streaming_server
@@ -453,13 +449,13 @@ def parse_dri_node_to_index(node_path: str) -> int:
         return -1
 
 async def _run_xrdb(dpi_value, logger):
-    """Helper function to apply DPI via xrdb."""
+    """Helper function to apply DPI via xrdb and xsettingsd."""
     if not which("xrdb"):
         logger.debug("xrdb not found. Skipping Xresources DPI setting.")
         return False
-    
+        
     xresources_path_str = os.path.expanduser("~/.Xresources")
-    try:
+    try:    
         with open(xresources_path_str, "w") as f:
             f.write(f"Xft.dpi:   {dpi_value}\n")
         logger.info(f"Wrote 'Xft.dpi:   {dpi_value}' to {xresources_path_str}.")
@@ -471,14 +467,58 @@ async def _run_xrdb(dpi_value, logger):
             stderr=subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        if process.returncode == 0:
+        
+        xrdb_success = process.returncode == 0
+        if xrdb_success:
             logger.info(f"Successfully loaded {xresources_path_str} using xrdb.")
-            return True
         else:
             logger.warning(f"Failed to load {xresources_path_str} using xrdb. RC: {process.returncode}, Error: {stderr.decode().strip()}")
-            return False
+
+        xsettingsd_config_path = os.path.expanduser("~/.xsettingsd")
+        xsettings_dpi = dpi_value * 1024
+        
+        config_content = (
+            "Xft/Antialias 1\n"
+            "Xft/Hinting 1\n"
+            "Xft/HintStyle \"hintfull\"\n"
+            "Xft/RGBA \"rgb\"\n"
+            f"Xft/DPI {xsettings_dpi}\n"
+        )
+        
+        with open(xsettingsd_config_path, "w") as f:
+            f.write(config_content)
+        logger.info(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
+
+        if not which("pgrep") or not which("kill"):
+            logger.debug("pgrep or kill not found. Skipping xsettingsd reload.")
+        else:
+            pgrep_proc = await subprocess.create_subprocess_exec(
+                "pgrep", "xsettingsd",
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            pgrep_stdout, _ = await pgrep_proc.communicate()
+
+            if pgrep_proc.returncode == 0:
+                pid_output = pgrep_stdout.decode().strip()
+                if pid_output:
+                    pid = pid_output.splitlines()[0]
+                    logger.info(f"Found xsettingsd process with PID: {pid}.")
+                    kill_proc = await subprocess.create_subprocess_exec(
+                        "kill", "-1", pid,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    _, kill_stderr = await kill_proc.communicate()
+                    if kill_proc.returncode == 0:
+                        logger.info(f"Sent SIGHUP to xsettingsd process {pid} to reload config.")
+                    else:
+                        logger.warning(f"Failed to send SIGHUP to xsettingsd process {pid}. Error: {kill_stderr.decode().strip()}")
+            else:
+                logger.info("xsettingsd process not found. Skipping reload.")
+        
+        return xrdb_success
+
     except Exception as e:
-        logger.error(f"Error updating or loading Xresources: {e}")
+        logger.error(f"Error updating or loading DPI settings: {e}")
         return False
 
 async def _run_xfconf(dpi_value, logger):
@@ -745,8 +785,18 @@ class DataStreamingServer:
         self._initial_h264_streaming_mode = self.cli_args.h264_streaming_mode
         self.h264_streaming_mode = self._initial_h264_streaming_mode
         self.capture_cursor = False
-        self._initial_jpeg_use_paint_over_quality = True
-        self._current_jpeg_use_paint_over_quality = True
+        self._initial_jpeg_quality = 60
+        self.jpeg_quality = self._initial_jpeg_quality
+        self._initial_paint_over_jpeg_quality = 90
+        self.paint_over_jpeg_quality = self._initial_paint_over_jpeg_quality
+        self._initial_h264_paintover_crf = 18
+        self.h264_paintover_crf = self._initial_h264_paintover_crf
+        self._initial_h264_paintover_burst_frames = 5
+        self.h264_paintover_burst_frames = self._initial_h264_paintover_burst_frames
+        self._initial_use_cpu = False
+        self.use_cpu = self._initial_use_cpu
+        self._initial_use_paint_over_quality = True
+        self.use_paint_over_quality = self._initial_use_paint_over_quality
         self._system_monitor_task_ws = None
         self._gpu_monitor_task_ws = None
         self._stats_sender_task_ws = None
@@ -770,6 +820,9 @@ class DataStreamingServer:
             self.app.video_bitrate if self.app else TARGET_VIDEO_BITRATE_KBPS
         )
         self._current_target_bitrate_kbps = self._initial_target_bitrate_kbps
+        self._pipeline_lock = asyncio.Lock()
+        self._bytes_sent_in_interval = 0
+        self._last_bandwidth_calc_time = time.monotonic()
         # Frame-based backpressure settings
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
@@ -817,7 +870,7 @@ class DataStreamingServer:
                 
                 # Protocol: 1-byte data type (0x01=audio) + 1-byte frame type (0x00=opus) + payload
                 message_to_send = b'\x01\x00' + opus_bytes
-
+                self._bytes_sent_in_interval += len(message_to_send)
                 active_clients = list(self.clients)
                 tasks = [client.send(message_to_send) for client in active_clients]
                 if tasks:
@@ -1226,6 +1279,7 @@ class DataStreamingServer:
                 if not self._backpressure_send_frames_enabled:
                     return
                 if clients_ref:
+                    self._bytes_sent_in_interval += len(data_to_send_ref)
                     websockets.broadcast(clients_ref, data_to_send_ref)
             if current_async_loop and current_async_loop.is_running():
                 asyncio.run_coroutine_threadsafe(
@@ -1272,7 +1326,9 @@ class DataStreamingServer:
             cs.output_mode = 1
             cs.h264_crf = crf
 
-            cs.use_paint_over_quality = True
+            cs.use_paint_over_quality = self.use_paint_over_quality
+            cs.h264_paintover_crf = self.h264_paintover_crf
+            cs.h264_paintover_burst_frames = self.h264_paintover_burst_frames
             cs.paint_over_trigger_frames = 5
             cs.damage_block_threshold = 10
             cs.damage_block_duration = 20
@@ -1280,6 +1336,7 @@ class DataStreamingServer:
             cs.h264_fullframe = enable_fullframe
             cs.h264_streaming_mode = self.h264_streaming_mode 
             cs.capture_cursor = self.capture_cursor
+            cs.use_cpu = self.use_cpu
             if self.cli_args.dri_node:
                 cs.vaapi_render_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
             else:
@@ -1370,6 +1427,7 @@ class DataStreamingServer:
                 if not self._backpressure_send_frames_enabled:
                     return
                 if clients_ref:
+                    self._bytes_sent_in_interval += len(prefixed_jpeg_data)
                     websockets.broadcast(clients_ref, prefixed_jpeg_data)
             if current_async_loop and current_async_loop.is_running():
                 asyncio.run_coroutine_threadsafe(
@@ -1392,9 +1450,8 @@ class DataStreamingServer:
         width = getattr(self.app, "display_width", 1024)
         height = getattr(self.app, "display_height", 768)
         fps = float(getattr(self.app, "framerate", TARGET_FRAMERATE))
-        quality = 60
 
-        data_logger.info(f"Starting JPEG: {width}x{height} @ {fps}fps, Q: {quality}")
+        data_logger.info(f"Starting JPEG: {width}x{height} @ {fps}fps, Q: {self.jpeg_quality}")
         try:
             cs = CaptureSettings()
             cs.capture_width = width
@@ -1404,10 +1461,10 @@ class DataStreamingServer:
             cs.target_fps = fps
             cs.output_mode = 0
             cs.capture_cursor = self.capture_cursor
-            cs.jpeg_quality = quality
-            cs.paint_over_jpeg_quality = 95
-            cs.use_paint_over_quality = self._current_jpeg_use_paint_over_quality
-            cs.paint_over_trigger_frames = 5
+            cs.jpeg_quality = self.jpeg_quality
+            cs.paint_over_jpeg_quality = self.paint_over_jpeg_quality
+            cs.use_paint_over_quality = self.use_paint_over_quality
+            cs.paint_over_trigger_frames = 15
             cs.damage_block_threshold = 10
             cs.damage_block_duration = 20
 
@@ -1518,6 +1575,15 @@ class DataStreamingServer:
         parsed["initialClientHeight"] = get_int(
             "webrtc_initialClientHeight", self.app.display_height
         )
+        parsed["jpeg_quality"] = get_int("pixelflux_jpeg_quality", self.jpeg_quality)
+        parsed["paint_over_jpeg_quality"] = get_int(
+            "pixelflux_paint_over_jpeg_quality", self.paint_over_jpeg_quality
+        )
+        parsed["use_cpu"] = get_bool("pixelflux_use_cpu", self.use_cpu)
+        parsed["h264_paintover_crf"] = get_int("pixelflux_h264_paintover_crf", self.h264_paintover_crf)
+        parsed["h264_paintover_burst_frames"] = get_int("pixelflux_h264_paintover_burst_frames", self.h264_paintover_burst_frames)
+        parsed["use_paint_over_quality"] = get_bool("pixelflux_use_paint_over_quality", self.use_paint_over_quality)
+        parsed["scaling_dpi"] = get_int("webrtc_SCALING_DPI", 96)
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -1527,7 +1593,6 @@ class DataStreamingServer:
         data_logger.info(
             f"Applying client settings (initial={is_initial_settings}): {settings}"
         )
-
         old_encoder = self.app.encoder
         old_video_bitrate_kbps = self.app.video_bitrate
         old_framerate = self.app.framerate
@@ -1537,6 +1602,12 @@ class DataStreamingServer:
         old_audio_bitrate_bps = self.app.audio_bitrate
         old_display_width = self.app.display_width
         old_display_height = self.app.display_height
+        old_jpeg_quality = self.jpeg_quality
+        old_paint_over_jpeg_quality = self.paint_over_jpeg_quality
+        old_use_cpu = self.use_cpu
+        old_h264_paintover_crf = self.h264_paintover_crf
+        old_h264_paintover_burst_frames = self.h264_paintover_burst_frames
+        old_use_paint_over_quality = self.use_paint_over_quality
 
         is_manual_res_mode_from_settings = settings.get(
             "isManualResolutionMode",
@@ -1600,68 +1671,113 @@ class DataStreamingServer:
         if "h264_streaming_mode" in settings and is_pixelflux_h264:
             if self.h264_streaming_mode != settings["h264_streaming_mode"]:
                 self.h264_streaming_mode = settings["h264_streaming_mode"]
+
+        is_jpeg = self.app.encoder == "jpeg"
+        if "jpeg_quality" in settings and is_jpeg:
+            self.jpeg_quality = settings["jpeg_quality"]
+
+        if "paint_over_jpeg_quality" in settings and is_jpeg:
+            self.paint_over_jpeg_quality = settings["paint_over_jpeg_quality"]
+
+        if "use_paint_over_quality" in settings:
+            self.use_paint_over_quality = settings["use_paint_over_quality"]
+
+        if "h264_paintover_crf" in settings and is_pixelflux_h264:
+            self.h264_paintover_crf = settings["h264_paintover_crf"]
+
+        if "h264_paintover_burst_frames" in settings and is_pixelflux_h264:
+            self.h264_paintover_burst_frames = settings["h264_paintover_burst_frames"]
+
+        if "use_cpu" in settings and is_pixelflux_h264:
+            self.use_cpu = settings["use_cpu"]
  
         if "audioBitRate" in settings:
             if self.app.audio_bitrate != settings["audioBitRate"]:
                  self.app.audio_bitrate = settings["audioBitRate"]
 
+        if "scaling_dpi" in settings:
+            dpi_value = settings["scaling_dpi"]
+            data_logger.info(f"Applying SCALING_DPI from initial settings: {dpi_value}")
+            if await set_dpi(dpi_value):
+                data_logger.info(f"Successfully set DPI to {dpi_value} from initial settings.")
+            else:
+                data_logger.error(f"Failed to set DPI to {dpi_value} from initial settings.")
+
+            if CURSOR_SIZE > 0:
+                calculated_cursor_size = int(round(dpi_value / 96.0 * CURSOR_SIZE))
+                new_cursor_size = max(1, calculated_cursor_size)
+                data_logger.info(f"Attempting to set cursor size to {new_cursor_size} based on initial DPI.")
+                if await set_cursor_size(new_cursor_size):
+                    data_logger.info(f"Successfully set cursor size to {new_cursor_size}.")
+                else:
+                    data_logger.error(f"Failed to set cursor size to {new_cursor_size}.")
+
         if "videoBufferSize" in settings:
             setattr(self.app, "video_buffer_size", settings["videoBufferSize"])
-
-        if not is_initial_settings:
+        async with self._pipeline_lock:
             resolution_actually_changed_on_server = (
                 self.app.display_width != old_display_width
                 or self.app.display_height != old_display_height
             )
-            bitrate_param_changed = self.app.video_bitrate != old_video_bitrate_kbps
             framerate_param_changed = self.app.framerate != old_framerate
             crf_param_changed = is_pixelflux_h264 and self.h264_crf != old_h264_crf
             h264_fullcolor_param_changed = is_pixelflux_h264 and self.h264_fullcolor != old_h264_fullcolor
             h264_streaming_mode_param_changed = is_pixelflux_h264 and self.h264_streaming_mode != old_h264_streaming_mode
+            jpeg_quality_param_changed = is_jpeg and self.jpeg_quality != old_jpeg_quality
+            paint_over_jpeg_quality_param_changed = (
+                is_jpeg and self.paint_over_jpeg_quality != old_paint_over_jpeg_quality
+            )
+            use_cpu_param_changed = is_pixelflux_h264 and self.use_cpu != old_use_cpu
+            h264_paintover_crf_param_changed = is_pixelflux_h264 and self.h264_paintover_crf != old_h264_paintover_crf
+            h264_paintover_burst_frames_param_changed = is_pixelflux_h264 and self.h264_paintover_burst_frames != old_h264_paintover_burst_frames
+            use_paint_over_quality_param_changed = self.use_paint_over_quality != old_use_paint_over_quality
             audio_bitrate_param_changed = self.app.audio_bitrate != old_audio_bitrate_bps
-
             restart_video_pipeline = False
             if encoder_actually_changed or resolution_actually_changed_on_server:
                 restart_video_pipeline = True
-            else:
-                if self.app.encoder in PIXELFLUX_VIDEO_ENCODERS:
-                    if framerate_param_changed: restart_video_pipeline = True
-                    if is_pixelflux_h264 and (crf_param_changed or h264_fullcolor_param_changed or h264_streaming_mode_param_changed):
-                        restart_video_pipeline = True
-
+            elif self.app.encoder in PIXELFLUX_VIDEO_ENCODERS:
+                if framerate_param_changed:
+                    restart_video_pipeline = True
+                if is_pixelflux_h264 and (
+                    crf_param_changed
+                    or h264_fullcolor_param_changed
+                    or h264_streaming_mode_param_changed
+                    or use_cpu_param_changed
+                    or h264_paintover_crf_param_changed
+                    or h264_paintover_burst_frames_param_changed
+                    or use_paint_over_quality_param_changed
+                ):
+                    restart_video_pipeline = True
+                if is_jpeg and (
+                    jpeg_quality_param_changed 
+                    or paint_over_jpeg_quality_param_changed
+                    or use_paint_over_quality_param_changed
+                ):
+                    restart_video_pipeline = True
+            video_is_currently_active = self.is_jpeg_capturing or self.is_x264_striped_capturing
+            if is_initial_settings and not video_is_currently_active:
+                data_logger.warning(
+                    "Pipeline is inactive for the initial client. Forcing a start."
+                )
+                restart_video_pipeline = True
             restart_audio_pipeline = audio_bitrate_param_changed
-
-            video_pipeline_was_active = False
-            if old_encoder == "jpeg" and self.is_jpeg_capturing: video_pipeline_was_active = True
-            elif old_encoder in PIXELFLUX_VIDEO_ENCODERS and old_encoder != "jpeg" and self.is_x264_striped_capturing: video_pipeline_was_active = True
-            
-            audio_pipeline_was_active = self.is_pcmflux_capturing
-
             if restart_video_pipeline:
-                if video_pipeline_was_active:
+                if self.is_jpeg_capturing or self.is_x264_striped_capturing:
                     data_logger.info(
-                        f"Restarting video pipeline (was {old_encoder}, now {self.app.encoder}) due to settings change."
+                        f"Restarting video pipeline (was {old_encoder}, now {self.app.encoder}) due to settings change or inactive state."
                     )
-                    # Stop old pipeline
                     if old_encoder == "jpeg": await self._stop_jpeg_pipeline()
                     elif old_encoder in PIXELFLUX_VIDEO_ENCODERS and old_encoder != "jpeg": await self._stop_x264_striped_pipeline()
                 else:
-                    data_logger.info(f"Video pipeline for {self.app.encoder} needs to start due to settings change (was not active).")
-
-                # Start new pipeline
+                    data_logger.info(f"Video pipeline for {self.app.encoder} needs to start (was not active or forced).")
                 if self.app.encoder == "jpeg": await self._start_jpeg_pipeline()
                 elif self.app.encoder in PIXELFLUX_VIDEO_ENCODERS and self.app.encoder != "jpeg": await self._start_x264_striped_pipeline()
-            
             if restart_audio_pipeline:
-                if audio_pipeline_was_active:
+                if self.is_pcmflux_capturing:
                     data_logger.info("Restarting audio pipeline due to settings update.")
                     await self._stop_pcmflux_pipeline()
                     await self._start_pcmflux_pipeline()
-                else:
-                    data_logger.info("Audio pipeline needs to start due to settings (was not active).")
-                    await self._start_pcmflux_pipeline()
-
-        if is_initial_settings and not self.client_settings_received.is_set():
+        if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
             data_logger.info("Initial client settings processed and event set by _apply_client_settings.")
 
@@ -1726,12 +1842,21 @@ class DataStreamingServer:
         self._last_client_stable_report_time = time.monotonic()
         self._initial_x264_crf = self.cli_args.h264_crf
         self.h264_crf = self._initial_x264_crf
+        self.h264_fullcolor = self._initial_h264_fullcolor
+        self.h264_streaming_mode = self._initial_h264_streaming_mode
+        self.jpeg_quality = self._initial_jpeg_quality
+        self.paint_over_jpeg_quality = self._initial_paint_over_jpeg_quality
+        self.use_cpu = self._initial_use_cpu
+        self.h264_paintover_crf = self._initial_h264_paintover_crf
+        self.h264_paintover_burst_frames = self._initial_h264_paintover_burst_frames
+        self.use_paint_over_quality = self._initial_use_paint_over_quality
+
         self._backpressure_send_frames_enabled = True
         active_uploads_by_path_conn = {}
         active_upload_target_path_conn = None
         upload_dir_valid = upload_dir_path is not None
-
-        mic_setup_done = False
+        
+        mic_setup_done = False 
         pa_module_index = None  # Stores the index of the loaded module-virtual-source
         pa_stream = None  # For pasimple playback
         pulse = None  # pulsectl.Pulse client instance
@@ -1758,6 +1883,9 @@ class DataStreamingServer:
             _send_stats_periodically_ws(
                 websocket, self._shared_stats_ws
             )  # Stats are per-client
+        )
+        self._network_monitor_task_ws = asyncio.create_task(
+            _collect_network_stats_ws(self._shared_stats_ws, self)
         )
 
         try:
@@ -2099,12 +2227,13 @@ class DataStreamingServer:
                                 if not video_is_active and current_encoder:
                                     data_logger.warning(f"Initial setup: Video pipeline for '{current_encoder}' was expected to be started by _apply_client_settings but is not. This might indicate an issue or a no-op change.")
                                 
-                                audio_is_active = self.is_pcmflux_capturing
-                                if not audio_is_active and PCMFLUX_AVAILABLE:
-                                    data_logger.info("Initial setup: Audio pipeline not yet active, attempting start.")
-                                    await self._start_pcmflux_pipeline()
-                                elif not PCMFLUX_AVAILABLE and not audio_is_active:
-                                     data_logger.warning("Initial setup: Audio pipeline (server-to-client) cannot be started (pcmflux not available).")
+                                async with self._pipeline_lock:
+                                    audio_is_active = self.is_pcmflux_capturing
+                                    if not audio_is_active and PCMFLUX_AVAILABLE:
+                                        data_logger.info("Initial setup: Audio pipeline not yet active, attempting start.")
+                                        await self._start_pcmflux_pipeline()
+                                    elif not PCMFLUX_AVAILABLE and not audio_is_active:
+                                         data_logger.warning("Initial setup: Audio pipeline (server-to-client) cannot be started (pcmflux not available).")
 
                         except json.JSONDecodeError:
                             data_logger.error(f"SETTINGS JSON decode error: {message}")
@@ -2174,53 +2303,57 @@ class DataStreamingServer:
                         active_upload_target_path_conn = None
 
                     elif message == "START_VIDEO":
-                        current_encoder = getattr(self.app, "encoder", None)
-                        data_logger.info(f"Received START_VIDEO for encoder: {current_encoder}")
-                        started_successfully = False
+                        async with self._pipeline_lock:
+                            current_encoder = getattr(self.app, "encoder", None)
+                            data_logger.info(f"Received START_VIDEO for encoder: {current_encoder}")
+                            started_successfully = False
 
-                        if current_encoder == "jpeg":
-                            started_successfully = await self._start_jpeg_pipeline()
-                        elif current_encoder in PIXELFLUX_VIDEO_ENCODERS and current_encoder != "jpeg":
-                            started_successfully = await self._start_x264_striped_pipeline()
+                            if current_encoder == "jpeg":
+                                started_successfully = await self._start_jpeg_pipeline()
+                            elif current_encoder in PIXELFLUX_VIDEO_ENCODERS and current_encoder != "jpeg":
+                                started_successfully = await self._start_x264_striped_pipeline()
                         
-                        if started_successfully:
-                            websockets.broadcast(self.clients, "VIDEO_STARTED")
-                        elif not started_successfully:
-                            data_logger.warning(f"START_VIDEO: Failed to start pipeline for encoder '{current_encoder}'.")
+                            if started_successfully:
+                                websockets.broadcast(self.clients, "VIDEO_STARTED")
+                            elif not started_successfully:
+                                data_logger.warning(f"START_VIDEO: Failed to start pipeline for encoder '{current_encoder}'.")
 
                     elif message == "STOP_VIDEO":
-                        data_logger.info("Received STOP_VIDEO")
-                        current_encoder = getattr(self.app, "encoder", None) 
+                        async with self._pipeline_lock:
+                            data_logger.info("Received STOP_VIDEO")
+                            current_encoder = getattr(self.app, "encoder", None) 
 
-                        if self.is_jpeg_capturing and current_encoder == "jpeg":
-                            await self._stop_jpeg_pipeline()
-                        elif self.is_x264_striped_capturing and (current_encoder in PIXELFLUX_VIDEO_ENCODERS and current_encoder != "jpeg"):
-                            await self._stop_x264_striped_pipeline()
+                            if self.is_jpeg_capturing and current_encoder == "jpeg":
+                                await self._stop_jpeg_pipeline()
+                            elif self.is_x264_striped_capturing and (current_encoder in PIXELFLUX_VIDEO_ENCODERS and current_encoder != "jpeg"):
+                                await self._stop_x264_striped_pipeline()
                         
-                        if self.clients:
-                            websockets.broadcast(self.clients, "VIDEO_STOPPED")
+                            if self.clients:
+                                websockets.broadcast(self.clients, "VIDEO_STOPPED")
 
-                    elif message == "START_AUDIO": 
-                        await self.client_settings_received.wait()
-                        data_logger.info(
-                            "Received START_AUDIO command from client for server-to-client audio."
-                        )
-                        if PCMFLUX_AVAILABLE:
-                            if not self.is_pcmflux_capturing:
-                                data_logger.info("START_AUDIO: Starting pcmflux audio pipeline.")
-                                await self._start_pcmflux_pipeline()
+                    elif message == "START_AUDIO":
+                        async with self._pipeline_lock:
+                            await self.client_settings_received.wait()
+                            data_logger.info(
+                                "Received START_AUDIO command from client for server-to-client audio."
+                            )
+                            if PCMFLUX_AVAILABLE:
+                                if not self.is_pcmflux_capturing:
+                                    data_logger.info("START_AUDIO: Starting pcmflux audio pipeline.")
+                                    await self._start_pcmflux_pipeline()
+                                else:
+                                    data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
                             else:
-                                data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
-                        else:
-                            data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
-                        websockets.broadcast(self.clients, "AUDIO_STARTED")
+                                data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
+                            websockets.broadcast(self.clients, "AUDIO_STARTED")
 
                     elif message == "STOP_AUDIO":
-                        data_logger.info("Received STOP_AUDIO")
-                        if self.is_pcmflux_capturing:
-                            await self._stop_pcmflux_pipeline()
-                        if self.clients:
-                            websockets.broadcast(self.clients, "AUDIO_STOPPED")
+                        async with self._pipeline_lock:
+                            data_logger.info("Received STOP_AUDIO")
+                            if self.is_pcmflux_capturing:
+                                await self._stop_pcmflux_pipeline()
+                            if self.clients:
+                                websockets.broadcast(self.clients, "AUDIO_STOPPED")
 
                     elif message.startswith("r,"):
                         await self.client_settings_received.wait() 
@@ -2376,6 +2509,140 @@ class DataStreamingServer:
                         except IndexError:
                             data_logger.warning(f"Malformed SET_H264_STREAMING_MODE message: {message}")
 
+                    elif message.startswith("SET_JPEG_QUALITY,"):
+                        await self.client_settings_received.wait()
+                        try:
+                            new_quality = int(message.split(",")[1])
+                            data_logger.info(f"Received SET_JPEG_QUALITY: {new_quality}")
+
+                            current_enc = getattr(self.app, "encoder", None)
+                            if current_enc == "jpeg":
+                                if self.jpeg_quality != new_quality:
+                                    self.jpeg_quality = new_quality
+                                    if self.is_jpeg_capturing:
+                                        data_logger.info(f"Restarting jpeg pipeline for JPEG_QUALITY change to {self.jpeg_quality}")
+                                        await self._stop_jpeg_pipeline()
+                                        await self._start_jpeg_pipeline()
+                                else:
+                                    data_logger.info(f"SET_JPEG_QUALITY: Value {new_quality} is already set.")
+                            else:
+                                data_logger.warning(f"SET_JPEG_QUALITY received but current encoder is '{current_enc}', not 'jpeg'.")
+                        except (IndexError, ValueError):
+                            data_logger.warning(f"Malformed SET_JPEG_QUALITY message: {message}")
+
+                    elif message.startswith("SET_PAINT_OVER_JPEG_QUALITY,"):
+                        await self.client_settings_received.wait()
+                        try:
+                            new_quality = int(message.split(",")[1])
+                            data_logger.info(f"Received SET_PAINT_OVER_JPEG_QUALITY: {new_quality}")
+
+                            current_enc = getattr(self.app, "encoder", None)
+                            if current_enc == "jpeg":
+                                if self.paint_over_jpeg_quality != new_quality:
+                                    self.paint_over_jpeg_quality = new_quality
+                                    if self.is_jpeg_capturing:
+                                        data_logger.info(f"Restarting jpeg pipeline for PAINT_OVER_JPEG_QUALITY change to {self.paint_over_jpeg_quality}")
+                                        await self._stop_jpeg_pipeline()
+                                        await self._start_jpeg_pipeline()
+                                else:
+                                    data_logger.info(f"SET_PAINT_OVER_JPEG_QUALITY: Value {new_quality} is already set.")
+                            else:
+                                data_logger.warning(f"SET_PAINT_OVER_JPEG_QUALITY received but current encoder is '{current_enc}', not 'jpeg'.")
+                        except (IndexError, ValueError):
+                            data_logger.warning(f"Malformed SET_PAINT_OVER_JPEG_QUALITY message: {message}")
+
+                    elif message.startswith("SET_USE_PAINT_OVER_QUALITY,"):
+                        await self.client_settings_received.wait()
+                        try:
+                            new_val_str = message.split(",")[1].strip().lower()
+                            new_val = new_val_str == "true"
+                            data_logger.info(f"Received SET_USE_PAINT_OVER_QUALITY: {new_val}")
+                            
+                            if self.use_paint_over_quality != new_val:
+                                self.use_paint_over_quality = new_val
+                                current_enc = getattr(self.app, "encoder", None)
+                                is_pixelflux_h264_active = (current_enc in PIXELFLUX_VIDEO_ENCODERS and current_enc != "jpeg" and self.is_x264_striped_capturing)
+                                is_jpeg_active = (current_enc == "jpeg" and self.is_jpeg_capturing)
+                                
+                                if is_jpeg_active or is_pixelflux_h264_active:
+                                    data_logger.info(f"Restarting {current_enc} pipeline for USE_PAINT_OVER_QUALITY change to {self.use_paint_over_quality}")
+                                    if is_jpeg_active:
+                                        await self._stop_jpeg_pipeline()
+                                        await self._start_jpeg_pipeline()
+                                    if is_pixelflux_h264_active:
+                                        await self._stop_x264_striped_pipeline()
+                                        await self._start_x264_striped_pipeline()
+                            else:
+                                data_logger.info(f"SET_USE_PAINT_OVER_QUALITY: Value {new_val} is already set.")
+                        except IndexError:
+                            data_logger.warning(f"Malformed SET_USE_PAINT_OVER_QUALITY message: {message}")
+
+                    elif message.startswith("SET_H264_PAINTOVER_CRF,"):
+                        await self.client_settings_received.wait()
+                        try:
+                            new_crf = int(message.split(",")[1])
+                            data_logger.info(f"Received SET_H264_PAINTOVER_CRF: {new_crf}")
+                            current_enc = getattr(self.app, "encoder", None)
+                            is_pixelflux_h264 = (current_enc in PIXELFLUX_VIDEO_ENCODERS and current_enc != "jpeg")
+                            if is_pixelflux_h264:
+                                if self.h264_paintover_crf != new_crf:
+                                    self.h264_paintover_crf = new_crf
+                                    if self.is_x264_striped_capturing:
+                                        data_logger.info(f"Restarting {current_enc} pipeline for H264_PAINTOVER_CRF change to {self.h264_paintover_crf}")
+                                        await self._stop_x264_striped_pipeline()
+                                        await self._start_x264_striped_pipeline()
+                                else:
+                                    data_logger.info(f"SET_H264_PAINTOVER_CRF: Value {new_crf} is already set.")
+                            else:
+                                data_logger.warning(f"SET_H264_PAINTOVER_CRF received but current encoder '{current_enc}' is not a Pixelflux H.264 encoder.")
+                        except (IndexError, ValueError):
+                            data_logger.warning(f"Malformed SET_H264_PAINTOVER_CRF message: {message}")
+
+                    elif message.startswith("SET_H264_PAINTOVER_BURST_FRAMES,"):
+                        await self.client_settings_received.wait()
+                        try:
+                            new_burst = int(message.split(",")[1])
+                            data_logger.info(f"Received SET_H264_PAINTOVER_BURST_FRAMES: {new_burst}")
+                            current_enc = getattr(self.app, "encoder", None)
+                            is_pixelflux_h264 = (current_enc in PIXELFLUX_VIDEO_ENCODERS and current_enc != "jpeg")
+                            if is_pixelflux_h264:
+                                if self.h264_paintover_burst_frames != new_burst:
+                                    self.h264_paintover_burst_frames = new_burst
+                                    if self.is_x264_striped_capturing:
+                                        data_logger.info(f"Restarting {current_enc} pipeline for H264_PAINTOVER_BURST_FRAMES change to {self.h264_paintover_burst_frames}")
+                                        await self._stop_x264_striped_pipeline()
+                                        await self._start_x264_striped_pipeline()
+                                else:
+                                    data_logger.info(f"SET_H264_PAINTOVER_BURST_FRAMES: Value {new_burst} is already set.")
+                            else:
+                                data_logger.warning(f"SET_H264_PAINTOVER_BURST_FRAMES received but current encoder '{current_enc}' is not a Pixelflux H.264 encoder.")
+                        except (IndexError, ValueError):
+                            data_logger.warning(f"Malformed SET_H264_PAINTOVER_BURST_FRAMES message: {message}")
+
+                    elif message.startswith("SET_USE_CPU,"):
+                        await self.client_settings_received.wait()
+                        try:
+                            new_use_cpu_str = message.split(",")[1].strip().lower()
+                            new_use_cpu = new_use_cpu_str == "true"
+                            data_logger.info(f"Received SET_USE_CPU: {new_use_cpu}")
+
+                            current_enc = getattr(self.app, "encoder", None)
+                            is_pixelflux_h264 = (current_enc in PIXELFLUX_VIDEO_ENCODERS and current_enc != "jpeg")
+
+                            if is_pixelflux_h264:
+                                if self.use_cpu != new_use_cpu:
+                                    self.use_cpu = new_use_cpu
+                                    if self.is_x264_striped_capturing:
+                                        data_logger.info(f"Restarting {current_enc} pipeline for USE_CPU change to {self.use_cpu}")
+                                        await self._stop_x264_striped_pipeline()
+                                        await self._start_x264_striped_pipeline()
+                                else:
+                                    data_logger.info(f"SET_USE_CPU: Value {new_use_cpu} is already set.")
+                            else:
+                                data_logger.warning(f"SET_USE_CPU received but current encoder '{current_enc}' is not a Pixelflux H.264 encoder.")
+                        except IndexError:
+                            data_logger.warning(f"Malformed SET_USE_CPU message: {message}")
+
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
                         await self.client_settings_received.wait()
                         try:
@@ -2483,6 +2750,16 @@ class DataStreamingServer:
                         await _task_to_cancel
                     except asyncio.CancelledError:
                         pass
+
+            if "_network_monitor_task_ws" in locals():
+                _task_to_cancel = locals()["_network_monitor_task_ws"]
+                if _task_to_cancel and not _task_to_cancel.done():
+                    _task_to_cancel.cancel()
+                    try:
+                        await _task_to_cancel
+                    except asyncio.CancelledError:
+                        pass
+
             if (
                 self._frame_backpressure_task
                 and not self._frame_backpressure_task.done()
@@ -2648,7 +2925,8 @@ class DataStreamingServer:
             if stop_pipelines_flag:
                 data_logger.info(f"Stopping global pipelines due to last client disconnect ({raddr}).")
                 self.capture_cursor = False
-                await self.shutdown_pipelines()
+                async with self._pipeline_lock:  # WRAP HERE
+                    await self.shutdown_pipelines()
 
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
@@ -2791,6 +3069,33 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1):
     except Exception as e:
         data_logger.error(f"GPU monitor (WS) error: {e}", exc_info=True)
 
+async def _collect_network_stats_ws(shared_data, server_instance, interval_seconds=2):
+    """Periodically calculates bandwidth and collects latency."""
+    data_logger.debug(
+        f"Network monitor loop (WS mode) started, interval: {interval_seconds}s"
+    )
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            current_time = time.monotonic()
+            elapsed_time = current_time - server_instance._last_bandwidth_calc_time
+            if elapsed_time > 0:
+                current_mbps = (server_instance._bytes_sent_in_interval * 8) / elapsed_time / 1_000_000
+            else:
+                current_mbps = 0.0
+            server_instance._bytes_sent_in_interval = 0
+            server_instance._last_bandwidth_calc_time = current_time
+            latency_ms = server_instance._smoothed_rtt_ms
+            shared_data["network"] = {
+                "type": "network_stats",
+                "timestamp": datetime.now().isoformat(),
+                "bandwidth_mbps": round(current_mbps, 2),
+                "latency_ms": round(latency_ms, 1),
+            }
+    except asyncio.CancelledError:
+        data_logger.info("Network monitor (WS) cancelled.")
+    except Exception as e:
+        data_logger.error(f"Network monitor (WS) error: {e}", exc_info=True)
 
 async def _send_stats_periodically_ws(websocket, shared_data, interval_seconds=5):
     try:
@@ -2798,6 +3103,7 @@ async def _send_stats_periodically_ws(websocket, shared_data, interval_seconds=5
             await asyncio.sleep(interval_seconds)
             system_stats = shared_data.pop("system", None)
             gpu_stats = shared_data.pop("gpu", None)
+            network_stats = shared_data.pop("network", None)
             try:
                 if not websocket:  # Check if websocket is still valid
                     data_logger.info("Stats sender: WS closed or invalid.")
@@ -2806,6 +3112,8 @@ async def _send_stats_periodically_ws(websocket, shared_data, interval_seconds=5
                     await websocket.send(json.dumps(system_stats))
                 if gpu_stats:
                     await websocket.send(json.dumps(gpu_stats))
+                if network_stats:
+                    await websocket.send(json.dumps(network_stats))
             except websockets.exceptions.ConnectionClosed:
                 data_logger.info("Stats sender: WS connection closed.")
                 break
@@ -2959,6 +3267,12 @@ async def main():
         type=int,
         help="Watermark location enum (0-6). Defaults to 4 (Bottom Right) if path is set and this is not specified or invalid.",
     )
+    parser.add_argument(
+        "--port",
+        default=os.environ.get("CUSTOM_WS_PORT", "8082"),
+        type=int,
+        help="The port for the data websocket server. Overrides the CUSTOM_WS_PORT environment variable.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args, unknown = parser.parse_known_args()
     global TARGET_FRAMERATE, TARGET_VIDEO_BITRATE_KBPS
@@ -2995,7 +3309,7 @@ async def main():
     )
 
     data_server = DataStreamingServer(
-        port=DATA_WEBSOCKET_PORT,
+        port=args.port,
         app=app,
         uinput_mouse_socket=UINPUT_MOUSE_SOCKET,
         js_socket_path=JS_SOCKET_PATH,
