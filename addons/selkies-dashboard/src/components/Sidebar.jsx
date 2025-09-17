@@ -67,6 +67,7 @@ const DEFAULT_VIDEO_BUFFER_SIZE = 0;
 const DEFAULT_ENCODER = encoderOptions[0];
 const DEFAULT_VIDEO_CRF = 25;
 const DEFAULT_SCALE_LOCALLY = true;
+const DEFAULT_ENABLE_BINARY_CLIPBOARD = false;
 const REPO_BASE_URL =
   "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
@@ -725,6 +726,14 @@ function Sidebar({ isOpen }) {
     const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
     return saved !== null ? saved === "true" : true;
   });
+  const [useBrowserCursors, setUseBrowserCursors] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("useBrowserCursors"));
+    return saved !== null ? saved === "true" : false;
+  });
+  const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("enableBinaryClipboard"));
+    return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
+  });
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
   const [audioBuffer, setAudioBuffer] = useState(0);
@@ -897,6 +906,16 @@ function Sidebar({ isOpen }) {
     []
   );
 
+  const debouncedUpdateEnableBinaryClipboardSettings = useCallback(
+    debounce((newVal) => {
+      window.postMessage(
+        { type: "settings", settings: { enableBinaryClipboard: newVal } },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
   const handleDpiScalingChange = (event) => {
     const newDpi = parseInt(event.target.value, 10);
     setSelectedDpi(newDpi);
@@ -904,27 +923,6 @@ function Sidebar({ isOpen }) {
       { type: "settings", settings: { SCALING_DPI: newDpi } },
       window.location.origin
     );
-
-    const notificationId = `scaling-action-required-${Date.now()}`;
-    const title = t("notifications.scalingTitle", "Scaling Updated: Action Required");
-    const message = t(
-      "notifications.scalingMessage", 
-      "New scaling applied. Some applications or desktop environments might require a restart."
-    );
-
-    setNotifications(prev => {
-      const newNotifs = [...prev, {
-        id: notificationId,
-        fileName: title,
-        status: 'end',
-        message: message,
-        timestamp: Date.now(),
-        fadingOut: false,
-      }];
-      return newNotifs.slice(-MAX_NOTIFICATIONS);
-    });
-
-    scheduleNotificationRemoval(notificationId, NOTIFICATION_TIMEOUT_ERROR); 
   };
 
   const DRAG_THRESHOLD = 10;
@@ -1313,6 +1311,19 @@ function Sidebar({ isOpen }) {
       { type: "setAntiAliasing", value: newState },
       window.location.origin
     );
+  };
+  const handleUseBrowserCursorsToggle = () => {
+    const newState = !useBrowserCursors;
+    setUseBrowserCursors(newState);
+    window.postMessage(
+      { type: "setUseBrowserCursors", value: newState },
+      window.location.origin
+    );
+  };
+  const handleEnableBinaryClipboardToggle = () => {
+    const newState = !enableBinaryClipboard;
+    setEnableBinaryClipboard(newState);
+    debouncedUpdateEnableBinaryClipboardSettings(newState);
   };
   const handleSetManualResolution = () => {
     const width = parseInt(manualWidth.trim(), 10),
@@ -1714,6 +1725,10 @@ function Sidebar({ isOpen }) {
                 ? message.encoders
                 : encoderOptions;
             setDynamicEncoderOptions(newEncoderOptions);
+          }
+          if (typeof message.enableBinaryClipboard === 'boolean') {
+            setEnableBinaryClipboard(message.enableBinaryClipboard);
+            console.log("Dashboard: Received enableBinaryClipboard setting from server:", message.enableBinaryClipboard);
           }
         } else if (message.type === "trackpadModeUpdate") {
           if (typeof message.enabled === 'boolean') {
@@ -2371,6 +2386,21 @@ function Sidebar({ isOpen }) {
                   <span className="toggle-button-sidebar-knob"></span>
                 </button>
               </div>
+              <div className="dev-setting-item toggle-item">
+                <label htmlFor="useBrowserCursorsToggle">
+                  {t("sections.screen.useNativeCursorStylesLabel", "Use CSS cursors")}
+                </label>
+                <button
+                  id="useBrowserCursorsToggle"
+                  className={`toggle-button-sidebar ${useBrowserCursors ? "active" : ""}`}
+                  onClick={handleUseBrowserCursorsToggle}
+                  aria-pressed={useBrowserCursors}
+                  title={t(useBrowserCursors ? "sections.screen.useNativeCursorStylesDisableTitle" : "sections.screen.useNativeCursorStylesEnableTitle",
+                             useBrowserCursors ? "Use canvas cursor rendering (Paint to canvas)" : "Use CSS cursor rendering (Replace system cursors)")}
+                >
+                  <span className="toggle-button-sidebar-knob"></span>
+                </button>
+              </div>
               <div className="dev-setting-item">
                 <label htmlFor="uiScalingSelect">
                   {t("sections.screen.uiScalingLabel", "UI Scaling")}
@@ -2950,7 +2980,24 @@ function Sidebar({ isOpen }) {
           </div>
           {sectionsOpen.clipboard && (
             <div className="sidebar-section-content" id="clipboard-content">
-              {" "}
+              <div className="dev-setting-item toggle-item">
+                <label 
+                  htmlFor="enableBinaryClipboardToggle"
+                  title={t("sections.clipboard.binaryModeDetails", "Allows copying and pasting images (e.g., PNG) to and from the remote session. May cause issues if a very large file is in the clipboard.")}
+                >
+                  {t("sections.clipboard.binaryModeLabel", "Image Support")}
+                </label>
+                <button
+                  id="enableBinaryClipboardToggle"
+                  className={`toggle-button-sidebar ${enableBinaryClipboard ? "active" : ""}`}
+                  onClick={handleEnableBinaryClipboardToggle}
+                  aria-pressed={enableBinaryClipboard}
+                  title={t(enableBinaryClipboard ? "buttons.binaryClipboardDisableTitle" : "buttons.binaryClipboardEnableTitle",
+                             enableBinaryClipboard ? "Disable Image Clipboard" : "Enable Image Clipboard")}
+                >
+                  <span className="toggle-button-sidebar-knob"></span>
+                </button>
+              </div>
               <div className="dashboard-clipboard-item">
                 {" "}
                 <label htmlFor="dashboardClipboardTextarea">

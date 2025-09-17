@@ -96,6 +96,9 @@ INTERPOSER_MAX_AXES = 64
 CONTROLLER_NAME_MAX_LEN = 255 
 C_INTERPOSER_STRUCT_SIZE = 1360
 
+# Max clipboard chunk size
+CLIPBOARD_CHUNK_SIZE = 750 * 1024 
+
 # For mouse input to send fake back and forward events
 KEYSYM_ALT_L = 0xFFE9     # Left Alt keysym
 KEYSYM_LEFT_ARROW = 0xFF51 # Left Arrow keysym
@@ -765,6 +768,7 @@ class WebRTCInput:
         uinput_mouse_socket_path="",
         js_socket_path_prefix="/tmp", 
         enable_clipboard="",
+        enable_binary_clipboard="",
         enable_cursors=True,
         cursor_size=16, 
         cursor_scale=1.0,
@@ -798,6 +802,7 @@ class WebRTCInput:
         self.uinput_mouse_socket_path = uinput_mouse_socket_path
         self.uinput_mouse_socket = None
         self.enable_clipboard = enable_clipboard
+        self.enable_binary_clipboard = enable_binary_clipboard
         self.enable_cursors = enable_cursors
         self.cursors_running = False
         self.cursor_scale = cursor_scale
@@ -810,6 +815,8 @@ class WebRTCInput:
         self.mouse = None
         self.xdisplay = None
         self.button_mask = 0
+        self.last_x = -1
+        self.last_y = -1
         self.ping_start = None
         self.on_video_encoder_bit_rate = lambda bitrate: logger_webrtc_input.warning("unhandled on_video_encoder_bit_rate")
         self.on_audio_encoder_bit_rate = lambda bitrate: logger_webrtc_input.warning("unhandled on_audio_encoder_bit_rate")
@@ -824,13 +831,46 @@ class WebRTCInput:
         self.on_ping_response = lambda latency: logger_webrtc_input.warning("unhandled on_ping_response")
         self.on_cursor_change = self._on_cursor_change
         self.on_client_webrtc_stats = lambda webrtc_stat_type, webrtc_stats: logger_webrtc_input.warning("unhandled on_client_webrtc_stats")
+        self.clipboard_monitor_task = None
+        self.multipart_clipboard_buffer = None
+        self.multipart_clipboard_mime_type = "text/plain"
+        self.multipart_clipboard_total_size = 0
+        self.multipart_clipboard_in_progress = False
 
-
-    def _on_clipboard_read(self, data): self.send_clipboard_data(data)
+    async def _on_clipboard_read(self, data, mime_type="text/plain"):
+        await self.send_clipboard_data(data, mime_type)
     def _on_cursor_change(self, data): self.send_cursor_data(data)
-    def send_clipboard_data(self, data):
-        if self.gst_webrtc_app.mode == "websockets": self.gst_webrtc_app.send_ws_clipboard_data(data)
-        else: self.gst_webrtc_app.send_clipboard_data(data)
+    async def send_clipboard_data(self, data, mime_type="text/plain"):
+        if self.gst_webrtc_app.mode != "websockets":
+            self.gst_webrtc_app.send_clipboard_data(data, mime_type)
+            return
+        try:
+            is_text = mime_type == "text/plain"
+            data_bytes = data.encode('utf-8') if is_text and isinstance(data, str) else data
+            total_size = len(data_bytes)
+            if total_size < CLIPBOARD_CHUNK_SIZE:
+                encoded_data = base64.b64encode(data_bytes).decode('ascii')
+                if is_text:
+                    message = f"clipboard,{encoded_data}"
+                else:
+                    message = f"clipboard_binary,{mime_type},{encoded_data}"
+                self.gst_webrtc_app.send_ws_message(message)
+            else:
+                logger_webrtc_input.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) in multiple parts.")
+                start_message = f"clipboard_start,{mime_type},{total_size}"
+                self.gst_webrtc_app.send_ws_message(start_message)
+                offset = 0
+                while offset < total_size:
+                    chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
+                    encoded_chunk = base64.b64encode(chunk).decode('ascii')
+                    data_message = f"clipboard_data,{encoded_chunk}"
+                    self.gst_webrtc_app.send_ws_message(data_message)
+                    offset += len(chunk)
+                    await asyncio.sleep(0)
+                self.gst_webrtc_app.send_ws_message("clipboard_finish")
+                logger_webrtc_input.info("Finished sending multi-part clipboard data.")
+        except Exception as e:
+            logger_webrtc_input.error(f"Failed to send clipboard data: {e}", exc_info=True)
     def send_cursor_data(self, data):
         if self.gst_webrtc_app.mode == "websockets": self.gst_webrtc_app.send_ws_cursor_data(data)
         else: self.gst_webrtc_app.send_cursor_data(data)
@@ -1159,10 +1199,13 @@ class WebRTCInput:
             pass
 
     async def send_x11_mouse(self, x, y, button_mask, scroll_magnitude, relative=False):
+        position_changed = (x != self.last_x or y != self.last_y)
         if relative:
             self.send_mouse(MOUSE_MOVE, (x, y))
-        else:
+        elif position_changed:
             self.send_mouse(MOUSE_POSITION, (x, y))
+        self.last_x = x
+        self.last_y = y
 
         if button_mask != self.button_mask:
             for bit_index in range(8): # Check bits 0 through 7
@@ -1240,48 +1283,111 @@ class WebRTCInput:
 
         if not relative and self.xdisplay:
             self.xdisplay.sync()
-    async def read_clipboard(self):
+    async def update_binary_clipboard_setting(self, enabled: bool):
+        """Asynchronously updates the binary clipboard setting and restarts the monitor if it's running."""
+        new_setting_str = "true" if enabled else "false"
+        if self.enable_binary_clipboard == new_setting_str:
+            return
+        logger_webrtc_input.info(f"Binary clipboard setting changing to: {enabled}. Restarting monitor.")
+        self.enable_binary_clipboard = new_setting_str
+        if self.clipboard_monitor_task and not self.clipboard_monitor_task.done():
+            self.stop_clipboard()  # Signal the loop to exit
+            self.clipboard_monitor_task.cancel()
+            try:
+                await self.clipboard_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self.clipboard_monitor_task = asyncio.create_task(self.start_clipboard())
+    async def read_clipboard(self, use_binary=False):
+        """Reads clipboard, prioritizing image formats if use_binary, otherwise only text."""
         try:
-            process = await subprocess.create_subprocess_exec(
-                "xsel", "--clipboard", "--output",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+            proc_targets = await subprocess.create_subprocess_exec(
+                "xclip", "-selection", "clipboard", "-o", "-t", "TARGETS",
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1)
-            if process.returncode == 0:
-                return stdout.decode('utf-8')
-            else:
-                logger_webrtc_input.warning(f"xsel failed with return code {process.returncode}: {stderr.decode()}")
-                return None
-        except Exception as e: logger_webrtc_input.warning(f"Error capturing clipboard: {e}"); return None
-    async def write_clipboard(self, data):
+            stdout_targets, _ = await asyncio.wait_for(proc_targets.communicate(), timeout=1)
+            if proc_targets.returncode != 0:
+                return None, None
+            targets = stdout_targets.decode().strip().split('\n')
+            if use_binary:
+                for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/svg', 'image/webp']:
+                    if mime_type in targets:
+                        proc_data = await subprocess.create_subprocess_exec(
+                            "xclip", "-selection", "clipboard", "-o", "-t", mime_type,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                        )
+                        stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=1)
+                        if proc_data.returncode == 0 and stdout_data:
+                            return stdout_data, mime_type
+            if 'UTF8_STRING' in targets:
+                proc_text = await subprocess.create_subprocess_exec(
+                    "xclip", "-selection", "clipboard", "-o", "-t", "UTF8_STRING",
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                stdout_text, _ = await asyncio.wait_for(proc_text.communicate(), timeout=1)
+                if proc_text.returncode == 0:
+                    return stdout_text.decode(), 'text/plain'
+            return None, None
+        except Exception as e:
+            logger_webrtc_input.warning(f"Error reading clipboard with xclip: {e}")
+            return None, None
+    async def write_clipboard(self, data, mime_type="text/plain"):
+        """Writes data to the clipboard with a specified MIME type."""
+        if not data:
+            return True
         try:
+            input_bytes = data if isinstance(data, bytes) else data.encode()
             process = await subprocess.create_subprocess_exec(
-                "xsel", "--clipboard", "--input",
+                "xclip", "-selection", "clipboard", "-i", "-t", mime_type,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=data.encode()), 
-                timeout=1
-            )
-            return process.returncode == 0
-        except Exception as e: 
-            logger_webrtc_input.warning(f"Error writing to clipboard: {e}")
+            if process.stdin:
+                process.stdin.write(input_bytes)
+                await process.stdin.drain()
+                process.stdin.close()
+            return_code = await asyncio.wait_for(process.wait(), timeout=2.0)
+            if return_code == 0:
+                return True
+            else:
+                logger_webrtc_input.warning(f"xclip process exited with non-zero code: {return_code}")
+                return False
+        except asyncio.TimeoutError:
+            logger_webrtc_input.warning("Timeout waiting for xclip process to terminate.")
             return False
-
+        except Exception:
+            logger_webrtc_input.warning("Error writing to clipboard with xclip", exc_info=True)
+            return False
     async def start_clipboard(self):
         if self.enable_clipboard not in ["true", "out"]:
             logger_webrtc_input.info("Skipping outbound clipboard service."); return
-        logger_webrtc_input.info("Starting clipboard monitor")
-        self.clipboard_running = True; last_data = ""
+        
+        logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
+        self.clipboard_running = True
+        last_data_bytes = b""
         while self.clipboard_running:
-            curr_data = await self.read_clipboard()
-            if curr_data is not None and curr_data != last_data:
-                logger_webrtc_input.info(f"Sending clipboard content, length: {len(curr_data)}")
-                self.on_clipboard_read(curr_data); last_data = curr_data
-            await asyncio.sleep(0.5)
+            try:
+                use_binary = self.enable_binary_clipboard in ["true", "out"]
+                curr_data, curr_mime = await self.read_clipboard(use_binary=use_binary)
+                if curr_data is None:
+                    curr_data_bytes = None
+                else:
+                    curr_data_bytes = curr_data.encode('utf-8') if isinstance(curr_data, str) else curr_data
+                if curr_data_bytes is not None and curr_data_bytes != last_data_bytes:
+                    log_data = curr_data if isinstance(curr_data, str) else f"<{len(curr_data)} bytes>"
+                    logger_webrtc_input.info(f"Clipboard changed. Sending content ({curr_mime}), data: {log_data[:80]}")
+                    await self.on_clipboard_read(curr_data, curr_mime)
+                    last_data_bytes = curr_data_bytes
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                logger_webrtc_input.info("Clipboard monitor task cancelled.")
+                break
+            except Exception as e:
+                logger_webrtc_input.error(f"Error in clipboard monitor loop: {e}", exc_info=True)
+                await asyncio.sleep(2)
+        
+        self.clipboard_running = False
         logger_webrtc_input.info("Clipboard monitor stopped")
 
     def stop_clipboard(self): self.clipboard_running = False; logger_webrtc_input.info("Stopping clipboard monitor")
@@ -1472,12 +1578,73 @@ class WebRTCInput:
                 target_gamepad_instance.send_event(axis_num, axis_val, is_button_event=False)
             
             else: logger_webrtc_input.warning(f"Unhandled joystick command for slot {gamepad_idx}: js {cmd}")
+        elif msg_type == "cws":
+            if self.enable_clipboard in ["true", "in"]:
+                try:
+                    self.multipart_clipboard_total_size = int(toks[1])
+                    self.multipart_clipboard_mime_type = "text/plain"
+                    self.multipart_clipboard_buffer = io.BytesIO()
+                    self.multipart_clipboard_in_progress = True
+                    logger_webrtc_input.info(f"Starting multi-part text clipboard receive, total size: {self.multipart_clipboard_total_size}")
+                except Exception as e:
+                    logger_webrtc_input.error(f"Invalid cws message: {msg}, error: {e}")
+            else:
+                logger_webrtc_input.warning("Rejecting multi-part clipboard write: inbound clipboard disabled.")
+        elif msg_type == "cbs":
+            if self.enable_clipboard in ["true", "in"]:
+                try:
+                    self.multipart_clipboard_mime_type = toks[1]
+                    self.multipart_clipboard_total_size = int(toks[2])
+                    self.multipart_clipboard_buffer = io.BytesIO()
+                    self.multipart_clipboard_in_progress = True
+                    logger_webrtc_input.info(f"Starting multi-part binary clipboard receive ({self.multipart_clipboard_mime_type}), total size: {self.multipart_clipboard_total_size}")
+                except Exception as e:
+                    logger_webrtc_input.error(f"Invalid cbs message: {msg}, error: {e}")
+            else:
+                logger_webrtc_input.warning("Rejecting multi-part clipboard write: inbound clipboard disabled.")
+        elif msg_type == "cwd" or msg_type == "cbd":
+            if self.multipart_clipboard_in_progress:
+                try:
+                    chunk_data = base64.b64decode(toks[1])
+                    self.multipart_clipboard_buffer.write(chunk_data)
+                except Exception as e:
+                    logger_webrtc_input.error(f"Failed to process clipboard data chunk: {e}")
+                    self.multipart_clipboard_in_progress = False
+        elif msg_type == "cwe" or msg_type == "cbe":
+            if self.multipart_clipboard_in_progress:
+                received_size = self.multipart_clipboard_buffer.tell()
+                if received_size != self.multipart_clipboard_total_size:
+                    logger_webrtc_input.error(f"Multi-part clipboard size mismatch. Expected {self.multipart_clipboard_total_size}, got {received_size}. Aborting.")
+                else:
+                    logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
+                    data = self.multipart_clipboard_buffer.getvalue()
+                    if self.multipart_clipboard_mime_type == "text/plain":
+                        text_data = data.decode("utf-8", "ignore")
+                        if await self.write_clipboard(text_data):
+                            logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(text_data)}")
+                    else:
+                        if await self.write_clipboard(data, mime_type=self.multipart_clipboard_mime_type):
+                            logger_webrtc_input.info(f"Set multi-part binary clipboard content ({self.multipart_clipboard_mime_type}), size: {len(data)} bytes")
+                self.multipart_clipboard_buffer = None
+                self.multipart_clipboard_in_progress = False
         elif msg_type == "cr": 
             if self.enable_clipboard in ["true", "out"]:
-                data = await self.read_clipboard()
-                if data: self.on_clipboard_read(data)
-                else: logger_webrtc_input.warning("No clipboard content to send")
+                data, mime_type = await self.read_clipboard(use_binary=self.enable_binary_clipboard in ["true", "out"])
+                if data:
+                    await self.on_clipboard_read(data, mime_type)
+                else: logger_webrtc_input.debug("No clipboard content to send on request")
             else: logger_webrtc_input.warning("Rejecting clipboard read: outbound clipboard disabled.")
+        elif msg_type == "cb":
+            if self.enable_clipboard in ["true", "in"]:
+                try:
+                    _, mime_type, b64_data = toks
+                    data_bytes = base64.b64decode(b64_data)
+                    if await self.write_clipboard(data_bytes, mime_type=mime_type):
+                        logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
+                except Exception as e:
+                    logger_webrtc_input.error(f"Binary clipboard write error: {e}")
+            else:
+                logger_webrtc_input.warning("Rejecting binary clipboard write: inbound binary clipboard disabled.")
         elif msg_type == "cw": 
             if self.enable_clipboard in ["true", "in"]:
                 try: data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')

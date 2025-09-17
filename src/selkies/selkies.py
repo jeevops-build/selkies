@@ -20,6 +20,7 @@ MIN_VIDEO_BITRATE_KBPS = 500
 UINPUT_MOUSE_SOCKET = ""
 JS_SOCKET_PATH = "/tmp"
 ENABLE_CLIPBOARD = True
+ENABLE_BINARY_CLIPBOARD = False
 ENABLE_CURSORS = True
 CURSOR_SIZE = 32
 DEBUG_CURSORS = False
@@ -148,30 +149,46 @@ class SelkiesStreamingApp:
         self._ws_fps_last_calc_time = time.monotonic()
         self._fps_interval_sec = 2.0
 
-    def send_ws_clipboard_data(
-        self, data
-    ):
-        if (
-            self.data_streaming_server
-            and hasattr(self.data_streaming_server, "clients")
-            and self.data_streaming_server.clients
-            and self.async_event_loop
-            and self.async_event_loop.is_running()
-        ):
-
-            msg_to_broadcast = f"clipboard,{base64.b64encode(data.encode()).decode()}"
-            clients_ref = self.data_streaming_server.clients
-
-            async def _broadcast_clipboard_helper():
-                websockets.broadcast(clients_ref, msg_to_broadcast)
-
-            asyncio.run_coroutine_threadsafe(
-                _broadcast_clipboard_helper(), self.async_event_loop
-            )
-        else:
-            data_logger.warning(
-                "Cannot broadcast clipboard data: no clients connected or server not ready."
-            )
+    async def send_ws_clipboard_data(self, data, mime_type="text/plain"):
+        """
+        Asynchronously sends clipboard data to all clients, handling multipart for large data.
+        """
+        if not (self.data_streaming_server and self.data_streaming_server.clients):
+            data_logger.warning("Cannot send clipboard: no clients or server not ready.")
+            return
+        try:
+            is_binary = mime_type != "text/plain"
+            if is_binary and not self.data_streaming_server.enable_binary_clipboard:
+                data_logger.warning(
+                    f"Attempted to send binary clipboard data ({mime_type}) but feature is disabled on server."
+                )
+                return
+            data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
+            total_size = len(data_bytes)
+            from .input_handler import CLIPBOARD_CHUNK_SIZE
+            if total_size < CLIPBOARD_CHUNK_SIZE:
+                encoded_data = base64.b64encode(data_bytes).decode('ascii')
+                if is_binary:
+                    message = f"clipboard_binary,{mime_type},{encoded_data}"
+                else:
+                    message = f"clipboard,{encoded_data}"
+                websockets.broadcast(self.data_streaming_server.clients, message)
+            else:
+                data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
+                start_message = f"clipboard_start,{mime_type},{total_size}"
+                websockets.broadcast(self.data_streaming_server.clients, start_message)
+                offset = 0
+                while offset < total_size:
+                    chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
+                    encoded_chunk = base64.b64encode(chunk).decode('ascii')
+                    data_message = f"clipboard_data,{encoded_chunk}"
+                    websockets.broadcast(self.data_streaming_server.clients, data_message)
+                    offset += len(chunk)
+                    await asyncio.sleep(0)
+                websockets.broadcast(self.data_streaming_server.clients, "clipboard_finish")
+                data_logger.info("Finished sending multi-part clipboard data.")
+        except Exception as e:
+            data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
 
     def send_ws_cursor_data(self, data):
         self.last_cursor_sent = data
@@ -521,36 +538,105 @@ async def _run_xrdb(dpi_value, logger):
         logger.error(f"Error updating or loading DPI settings: {e}")
         return False
 
+async def _get_xfce_session_env(logger):
+    """
+    Finds the running xfce4-session process and extracts its environment variables.
+    This is necessary to communicate with the correct D-Bus session.
+    """
+    try:
+        proc_pid = await subprocess.create_subprocess_exec(
+            "pgrep", "-o", "-x", "xfce4-session",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout_pid, stderr_pid = await proc_pid.communicate()
+
+        if proc_pid.returncode != 0:
+            logger.debug(f"Could not find running xfce4-session: {stderr_pid.decode().strip()}")
+            return None
+        
+        pid = stdout_pid.decode().strip()
+        
+        env_path = f"/proc/{pid}/environ"
+        if not os.path.exists(env_path):
+            logger.debug(f"Could not read environment for PID {pid}. Path {env_path} does not exist.")
+            return None
+
+        with open(env_path, "r") as f:
+            environ_data = f.read()
+        
+        env = {}
+        for line in environ_data.split('\x00'):
+            if '=' in line:
+                key, value = line.split('=', 1)
+                env[key] = value
+        
+        if "DBUS_SESSION_BUS_ADDRESS" not in env:
+            logger.debug(f"Found xfce4-session (PID {pid}), but DBUS_SESSION_BUS_ADDRESS was not in its environment.")
+            return None
+
+        return env
+
+    except Exception as e:
+        logger.warning(f"Failed to get XFCE session environment, will proceed with default environment: {e}")
+        return None
+
 async def _run_xfconf(dpi_value, logger):
     """Helper function to apply DPI via xfconf-query for XFCE."""
     if not which("xfconf-query"):
         logger.debug("xfconf-query not found. Skipping XFCE DPI setting via xfconf-query.")
         return False
 
-    cmd_xfconf = [
-        "xfconf-query",
-        "-c", "xsettings",
-        "-p", "/Xft/DPI",
-        "-s", str(dpi_value),
-        "--create",
-        "-t", "int",
-    ]
-    try:
-        process = await subprocess.create_subprocess_exec(
-            *cmd_xfconf,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        if process.returncode == 0:
-            logger.info(f"Successfully set XFCE DPI to {dpi_value} using xfconf-query.")
-            return True
-        else:
-            logger.warning(f"Failed to set XFCE DPI using xfconf-query. RC: {process.returncode}, Error: {stderr.decode().strip()}")
+    session_env = await _get_xfce_session_env(logger)
+    if session_env:
+        logger.info("Found active XFCE session environment. Commands will be executed within this context.")
+    else:
+        logger.warning("Could not obtain XFCE session environment. Falling back to direct execution.")
+
+    async def run_command(cmd, success_msg, failure_msg):
+        try:
+            process = await subprocess.create_subprocess_exec(
+                *cmd,
+                env=session_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            _stdout, stderr = await process.communicate()
+            if process.returncode == 0:
+                logger.info(success_msg)
+                return True
+            else:
+                logger.warning(f"{failure_msg}. RC: {process.returncode}, Error: {stderr.decode().strip()}")
+                return False
+        except Exception as e:
+            logger.error(f"Error running command '{' '.join(cmd)}': {e}")
             return False
-    except Exception as e:
-        logger.error(f"Error running xfconf-query: {e}")
+
+    cmd_dpi = [
+        "xfconf-query", "-c", "xsettings", "-p", "/Xft/DPI",
+        "-s", str(dpi_value), "--create", "-t", "int"
+    ]
+    if not await run_command(
+        cmd_dpi,
+        f"Successfully set XFCE DPI to {dpi_value} using xfconf-query.",
+        "Failed to set XFCE DPI using xfconf-query"
+    ):
         return False
+
+    cursor_size = int(round(dpi_value / 96 * 32))
+    logger.info(f"Attempting to set cursor size to: {cursor_size} (based on DPI {dpi_value})")
+    cmd_cursor = [
+        "xfconf-query", "-c", "xsettings", "-p", "/Gtk/CursorThemeSize",
+        "-s", str(cursor_size), "--create", "-t", "int"
+    ]
+    if not await run_command(
+        cmd_cursor,
+        f"Successfully set cursor size to {cursor_size}",
+        "Failed to set cursor size using xfconf-query"
+    ):
+        return False
+
+    return True
 
 async def _run_mate_gsettings(dpi_value, logger):
     """Helper function to apply DPI via gsettings for MATE."""
@@ -804,6 +890,7 @@ class DataStreamingServer:
         self.uinput_mouse_socket = uinput_mouse_socket
         self.js_socket_path = js_socket_path
         self.enable_clipboard = enable_clipboard
+        self.enable_binary_clipboard = False
         self.enable_cursors = enable_cursors
         self.cursor_size = cursor_size
         self.cursor_scale = cursor_scale
@@ -1584,6 +1671,7 @@ class DataStreamingServer:
         parsed["h264_paintover_burst_frames"] = get_int("pixelflux_h264_paintover_burst_frames", self.h264_paintover_burst_frames)
         parsed["use_paint_over_quality"] = get_bool("pixelflux_use_paint_over_quality", self.use_paint_over_quality)
         parsed["scaling_dpi"] = get_int("webrtc_SCALING_DPI", 96)
+        parsed["enableBinaryClipboard"] = get_bool("enableBinaryClipboard", self.enable_binary_clipboard)
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -1639,6 +1727,11 @@ class DataStreamingServer:
             setattr(self.app, "client_manual_width", settings.get("manualWidth", getattr(self.app, "client_manual_width", old_display_width)))
             setattr(self.app, "client_manual_height", settings.get("manualHeight", getattr(self.app, "client_manual_height", old_display_height)))
         setattr(self.app, "client_preferred_resize_enabled", settings.get("resizeRemote", getattr(self.app, "client_preferred_resize_enabled", True)))
+        if "enableBinaryClipboard" in settings:
+            new_binary_clipboard_state = settings["enableBinaryClipboard"]
+            self.enable_binary_clipboard = new_binary_clipboard_state
+            if self.input_handler:
+                await self.input_handler.update_binary_clipboard_setting(new_binary_clipboard_state)
 
         encoder_actually_changed = False
         requested_new_encoder = settings.get("encoder")
@@ -1860,10 +1953,14 @@ class DataStreamingServer:
         pa_module_index = None  # Stores the index of the loaded module-virtual-source
         pa_stream = None  # For pasimple playback
         pulse = None  # pulsectl.Pulse client instance
-
+        
+        # Audio buffer management
+        audio_buffer = []
+        buffer_max_size = 24000 * 2 * 2  # 2 seconds at 24kHz, 16-bit mono
+        
         # Define virtual source details
         virtual_source_name = "SelkiesVirtualMic"
-        master_monitor = "output.monitor"
+        master_monitor = "input.monitor"
 
         if not self.input_handler:
             logger.error(
@@ -2014,36 +2111,64 @@ class DataStreamingServer:
                                             pa_module_index = None  # Reset on failure to unload or if it was problematic
 
                                 if mic_setup_done:
-                                    # Set as default source
-                                    source_to_set_default = None
                                     current_source_list = (
                                         pulse.source_list()
-                                    )  # Re-fetch list
-                                    for source_obj_default in current_source_list:
-                                        if (
-                                            source_obj_default.name
-                                            == virtual_source_name
-                                        ):
-                                            source_to_set_default = source_obj_default
-                                            break
-
-                                    if source_to_set_default:
-                                        if (
-                                            pulse.server_info().default_source_name
-                                            != source_to_set_default.name
-                                        ):
-                                            pulse.default_set(source_to_set_default)
-                                            data_logger.info(
-                                                f"Set default PulseAudio source to '{virtual_source_name}'."
-                                            )
-                                        else:
-                                            data_logger.info(
-                                                f"Default PulseAudio source is already '{virtual_source_name}'."
-                                            )
-                                    else:
-                                        data_logger.error(
-                                            f"Could not find source '{virtual_source_name}' to set as default after setup."
-                                        )
+                                    )
+                                    # Mic is automatically set to the source for recording (pcmflux) and input
+                                    # Set pcmflux back to the input source
+                                    if self.is_pcmflux_capturing:
+                                        try:
+                                            # Get all source outputs to find pcmflux
+                                            source_outputs = pulse.source_output_list()
+                                            pcmflux_output = None
+                                            
+                                            for output in source_outputs:
+                                                if hasattr(output, 'proplist') and output.proplist.get('application.name') == 'pcmflux':
+                                                    pcmflux_output = output
+                                                    break
+                                            
+                                            if pcmflux_output:
+                                                # Get the source pcmflux is connected to
+                                                connected_source = None
+                                                for source in current_source_list:
+                                                    if source.index == pcmflux_output.source:
+                                                        connected_source = source
+                                                        break
+                                                
+                                                # Check if it's connected to the wrong source
+                                                if connected_source and connected_source.name != self.audio_device_name:
+                                                    data_logger.warning(
+                                                        f"pcmflux connected to wrong source '{connected_source.name}', moving to '{self.audio_device_name}'"
+                                                    )
+                                                    
+                                                    # Find the correct source to move to
+                                                    correct_source = None
+                                                    for source in current_source_list:
+                                                        if source.name == self.audio_device_name:
+                                                            correct_source = source
+                                                            break
+                                                    
+                                                    if correct_source:
+                                                        # Move pcmflux to the correct source
+                                                        pulse.source_output_move(pcmflux_output.index, correct_source.index)
+                                                        data_logger.info(
+                                                            f"Successfully moved pcmflux from '{connected_source.name}' to '{self.audio_device_name}'"
+                                                        )
+                                                    else:
+                                                        data_logger.error(
+                                                            f"Could not find source '{self.audio_device_name}' to move pcmflux to"
+                                                        )
+                                                elif connected_source:
+                                                    data_logger.info(f"pcmflux correctly connected to '{connected_source.name}'")
+                                            else:
+                                                data_logger.debug("Could not find pcmflux in source outputs")
+                                                
+                                        except Exception as e:
+                                            data_logger.error(f"Error checking/fixing pcmflux source: {e}")
+                                    
+                                    data_logger.info(
+                                        f"Virtual microphone '{virtual_source_name}' is ready for microphone forwarding."
+                                    )
 
                             except Exception as e_pa_setup:
                                 data_logger.error(
@@ -2088,8 +2213,19 @@ class DataStreamingServer:
                                     "MicStream",
                                     device_name="input",  # Play to system's default input (which should be our virtual mic)
                                 )
-                            if pa_stream:
-                                pa_stream.write(payload)
+                            
+                            audio_buffer.extend(payload)
+                            
+                            if len(audio_buffer) > buffer_max_size:
+                                audio_buffer = audio_buffer[len(audio_buffer)//2:]
+                                data_logger.warning("Audio buffer overflow, dropping old audio to prevent drift")
+                            
+                            if pa_stream and len(audio_buffer) >= len(payload):
+                                chunk_size = len(payload)
+                                data_to_write = bytes(audio_buffer[:chunk_size])
+                                audio_buffer[:chunk_size] = []
+                                pa_stream.write(data_to_write)
+                                    
                         except Exception as e_pa_write:
                             data_logger.error(
                                 f"PulseAudio stream write error: {e_pa_write}",
@@ -2100,7 +2236,7 @@ class DataStreamingServer:
                                     pa_stream.close()
                                 except:
                                     pass
-                            pa_stream = None  # Force re-open on next packet
+                            audio_buffer.clear()
 
                 elif isinstance(message, str):
                     if message.startswith("FILE_UPLOAD_START:"):
@@ -3234,8 +3370,8 @@ async def main():
     )
     parser.add_argument(
         "--audio_device_name",
-        default=os.environ.get("SELKIES_AUDIO_DEVICE", ""),
-        help="Audio device name for pcmflux (e.g., a PulseAudio .monitor source). Defaults to system default input.",
+        default=os.environ.get("SELKIES_AUDIO_DEVICE", "output.monitor"),
+        help="Audio device name for pcmflux (e.g., a PulseAudio .monitor source). Defaults to output.monitor.",
     )
     parser.add_argument(
         "--h264_crf",
@@ -3328,6 +3464,7 @@ async def main():
         UINPUT_MOUSE_SOCKET,
         JS_SOCKET_PATH,
         str(ENABLE_CLIPBOARD).lower(),
+        str(ENABLE_BINARY_CLIPBOARD).lower(),
         ENABLE_CURSORS,
         CURSOR_SIZE,
         1.0,
@@ -3359,9 +3496,8 @@ async def main():
             asyncio.create_task(input_handler.connect(), name="InputConnect")
         )
     if hasattr(input_handler, "start_clipboard"):
-        tasks_to_run.append(
-            asyncio.create_task(input_handler.start_clipboard(), name="ClipboardMon")
-        )
+        input_handler.clipboard_monitor_task = asyncio.create_task(input_handler.start_clipboard(), name="ClipboardMon")
+        tasks_to_run.append(input_handler.clipboard_monitor_task)
     if hasattr(input_handler, "start_cursor_monitor"):
         tasks_to_run.append(
             asyncio.create_task(input_handler.start_cursor_monitor(), name="CursorMon")

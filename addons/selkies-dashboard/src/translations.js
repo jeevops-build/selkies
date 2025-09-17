@@ -35,6 +35,8 @@ const en = {
         useCpuDisableTitle: "Disable Force CPU Encoding (Overrides nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Enable Paint-Overs (Cleans up static portions of the screen)",
         usePaintOverQualityDisableTitle: "Disable Paint-Overs (Cleans up static portions of the screen)",
+        binaryClipboardEnableTitle: "Enable Image Clipboard",
+        binaryClipboardDisableTitle: "Disable Image Clipboard",
     },
     sections: {
         video: {
@@ -88,6 +90,9 @@ const en = {
             antiAliasingLabel: "Anti-aliasing",
             antiAliasingEnableTitle: "Enable anti-aliasing (smooth on scaling)",
             antiAliasingDisableTitle: "Disable anti-aliasing (force pixelated)",
+            useNativeCursorStylesLabel: "Use CSS cursors",
+            useNativeCursorStylesEnableTitle: "Use CSS cursor rendering (Replace system cursors)",
+            useNativeCursorStylesDisableTitle: "Use canvas cursor rendering (Paint to canvas)",
         },
         stats: {
             title: "Stats",
@@ -113,6 +118,8 @@ const en = {
             title: "Clipboard",
             label: "Server Clipboard:",
             placeholder: "Clipboard content from server...",
+            binaryModeLabel: "Image Support",
+            binaryModeDetails: "Allows copying and pasting images to and from the remote session.",
         },
         files: {
             title: "Files",
@@ -217,6 +224,8 @@ const es = {
         useCpuDisableTitle: "Desactivar Codificación Forzada por CPU (Sobrescribe nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Activar Mejora de Estáticos (Limpia porciones estáticas de la pantalla)",
         usePaintOverQualityDisableTitle: "Desactivar Mejora de Estáticos (Limpia porciones estáticas de la pantalla)",
+        binaryClipboardEnableTitle: "Activar Portapapeles de Imágenes",
+        binaryClipboardDisableTitle: "Desactivar Portapapeles de Imágenes",
     },
     sections: {
         video: {
@@ -270,6 +279,9 @@ const es = {
              antiAliasingLabel: "Anti-aliasing",
              antiAliasingEnableTitle: "Activar anti-aliasing (suavizar al escalar)",
              antiAliasingDisableTitle: "Desactivar anti-aliasing (forzar pixelado)",
+             useNativeCursorStylesLabel: "Usar cursores CSS",
+             useNativeCursorStylesEnableTitle: "Usar renderizado de cursor CSS (Reemplaza los cursores del sistema)",
+             useNativeCursorStylesDisableTitle: "Usar renderizado de cursor en lienzo (Pintar en el lienzo)",
         },
         stats: {
              title: "Estadísticas",
@@ -295,6 +307,8 @@ const es = {
              title: "Portapapeles",
              label: "Portapapeles del Servidor:",
              placeholder: "Contenido del portapapeles del servidor...",
+             binaryModeLabel: "Soporte de Imágenes",
+             binaryModeDetails: "Permite copiar y pegar imágenes desde y hacia la sesión remota.",
         },
         files: {
              title: "Archivos",
@@ -399,6 +413,8 @@ const zh = {
         useCpuDisableTitle: "禁用强制 CPU 编码 (覆盖 nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "启用静态区域优化 (清理屏幕的静态部分)",
         usePaintOverQualityDisableTitle: "禁用静态区域优化 (清理屏幕的静态部分)",
+        binaryClipboardEnableTitle: "启用图像剪贴板",
+        binaryClipboardDisableTitle: "禁用图像剪贴板",
     },
     sections: {
         video: {
@@ -452,6 +468,9 @@ const zh = {
             antiAliasingLabel: "抗锯齿",
             antiAliasingEnableTitle: "启用抗锯齿 (缩放时平滑)",
             antiAliasingDisableTitle: "禁用抗锯齿 (强制像素化)",
+            useNativeCursorStylesLabel: "使用 CSS 光标",
+            useNativeCursorStylesEnableTitle: "使用 CSS 光标渲染 (替换系统光标)",
+            useNativeCursorStylesDisableTitle: "使用画布光标渲染 (绘制到画布)",
         },
         stats: {
             title: "统计信息",
@@ -477,6 +496,8 @@ const zh = {
             title: "剪贴板",
             label: "服务器剪贴板:",
             placeholder: "来自服务器的剪贴板内容...",
+            binaryModeLabel: "图像支持",
+            binaryModeDetails: "允许在远程会话中复制和粘贴图像。",
         },
         files: {
             title: "文件",
@@ -581,6 +602,8 @@ const hi = {
         useCpuDisableTitle: "फोर्स सीपीयू एन्कोडिंग अक्षम करें (nvenc/vaapi को ओवरराइड करता है)",
         usePaintOverQualityEnableTitle: "स्थिर छवि सुधार सक्षम करें (स्क्रीन के स्थिर हिस्सों को साफ करता है)",
         usePaintOverQualityDisableTitle: "स्थिर छवि सुधार अक्षम करें (स्क्रीन के स्थिर हिस्सों को साफ करता है)",
+        binaryClipboardEnableTitle: "छवि क्लिपबोर्ड सक्षम करें",
+        binaryClipboardDisableTitle: "छवि क्लिपबोर्ड अक्षम करें",
     },
     sections: {
         video: {
@@ -634,6 +657,9 @@ const hi = {
             antiAliasingLabel: "एंटी-अलियासिंग",
             antiAliasingEnableTitle: "एंटी-अलियासिंग सक्षम करें (स्केलिंग पर स्मूथ)",
             antiAliasingDisableTitle: "एंटी-अलियासिंग अक्षम करें (पिक्सेलयुक्त करने के लिए बाध्य करें)",
+            useNativeCursorStylesLabel: "CSS कर्सर का उपयोग करें",
+            useNativeCursorStylesEnableTitle: "CSS कर्सर रेंडरिंग का उपयोग करें (सिस्टम कर्सर बदलें)",
+            useNativeCursorStylesDisableTitle: "कैनवास कर्सर रेंडरिंग का उपयोग करें (कैनवास पर पेंट करें)",
         },
         stats: {
             title: "आँकड़े",
@@ -659,6 +685,8 @@ const hi = {
             title: "क्लिपबोर्ड",
             label: "सर्वर क्लिपबोर्ड:",
             placeholder: "सर्वर से क्लिपबोर्ड सामग्री...",
+            binaryModeLabel: "छवि समर्थन",
+            binaryModeDetails: "रिमोट सत्र से और उसमें छवियों को कॉपी और पेस्ट करने की अनुमति देता है।",
         },
         files: {
             title: "फ़ाइलें",
@@ -763,6 +791,8 @@ const pt = {
         useCpuDisableTitle: "Desativar Codificação Forçada por CPU (Substitui nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Ativar Melhoria de Estáticos (Limpa porções estáticas da tela)",
         usePaintOverQualityDisableTitle: "Desativar Melhoria de Estáticos (Limpa porções estáticas da tela)",
+        binaryClipboardEnableTitle: "Ativar Área de Transferência de Imagens",
+        binaryClipboardDisableTitle: "Desativar Área de Transferência de Imagens",
     },
     sections: {
         video: {
@@ -816,6 +846,9 @@ const pt = {
             antiAliasingLabel: "Anti-aliasing",
             antiAliasingEnableTitle: "Ativar anti-aliasing (suavizar ao escalar)",
             antiAliasingDisableTitle: "Desativar anti-aliasing (forçar pixelização)",
+            useNativeCursorStylesLabel: "Usar cursores CSS",
+            useNativeCursorStylesEnableTitle: "Usar renderização de cursor CSS (Substituir cursores do sistema)",
+            useNativeCursorStylesDisableTitle: "Usar renderização de cursor em canvas (Pintar no canvas)",
         },
         stats: {
             title: "Estatísticas",
@@ -841,6 +874,8 @@ const pt = {
             title: "Área de Transferência",
             label: "Área de Transferência do Servidor:",
             placeholder: "Conteúdo da área de transferência do servidor...",
+            binaryModeLabel: "Suporte a Imagens",
+            binaryModeDetails: "Permite copiar e colar imagens de e para a sessão remota.",
         },
         files: {
             title: "Arquivos",
@@ -945,6 +980,8 @@ const fr = {
         useCpuDisableTitle: "Désactiver l'encodage forcé par CPU (Remplace nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Activer le raffinage statique (Nettoie les parties statiques de l'écran)",
         usePaintOverQualityDisableTitle: "Désactiver le raffinage statique (Nettoie les parties statiques de l'écran)",
+        binaryClipboardEnableTitle: "Activer le presse-papiers d'images",
+        binaryClipboardDisableTitle: "Désactiver le presse-papiers d'images",
     },
     sections: {
         video: {
@@ -998,6 +1035,9 @@ const fr = {
             antiAliasingLabel: "Anticrénelage",
             antiAliasingEnableTitle: "Activer l'anticrénelage (lisser à la mise à l'échelle)",
             antiAliasingDisableTitle: "Désactiver l'anticrénelage (forcer la pixellisation)",
+            useNativeCursorStylesLabel: "Utiliser les curseurs CSS",
+            useNativeCursorStylesEnableTitle: "Utiliser le rendu des curseurs CSS (Remplacer les curseurs système)",
+            useNativeCursorStylesDisableTitle: "Utiliser le rendu des curseurs sur canevas (Dessiner sur le canevas)",
         },
         stats: {
             title: "Statistiques",
@@ -1023,6 +1063,8 @@ const fr = {
             title: "Presse-papiers",
             label: "Presse-papiers du serveur :",
             placeholder: "Contenu du presse-papiers depuis le serveur...",
+            binaryModeLabel: "Support d'images",
+            binaryModeDetails: "Permet de copier et coller des images depuis et vers la session distante.",
         },
         files: {
             title: "Fichiers",
@@ -1127,6 +1169,8 @@ const ru = {
         useCpuDisableTitle: "Отключить принудительное кодирование ЦП (Переопределяет nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Включить улучшение статики (Очищает статичные части экрана)",
         usePaintOverQualityDisableTitle: "Отключить улучшение статики (Очищает статичные части экрана)",
+        binaryClipboardEnableTitle: "Включить буфер обмена изображений",
+        binaryClipboardDisableTitle: "Отключить буфер обмена изображений",
     },
     sections: {
         video: {
@@ -1180,6 +1224,9 @@ const ru = {
             antiAliasingLabel: "Сглаживание",
             antiAliasingEnableTitle: "Включить сглаживание (плавно при масштабировании)",
             antiAliasingDisableTitle: "Отключить сглаживание (принудительно пикселизировать)",
+            useNativeCursorStylesLabel: "Использовать курсоры CSS",
+            useNativeCursorStylesEnableTitle: "Использовать рендеринг курсора CSS (Заменяет системные курсоры)",
+            useNativeCursorStylesDisableTitle: "Использовать отрисовку курсора на холсте (Рисовать на холсте)",
         },
         stats: {
             title: "Статистика",
@@ -1205,6 +1252,8 @@ const ru = {
             title: "Буфер обмена",
             label: "Буфер обмена сервера:",
             placeholder: "Содержимое буфера обмена с сервера...",
+            binaryModeLabel: "Поддержка изображений",
+            binaryModeDetails: "Позволяет копировать и вставлять изображения в удаленную сессию и из нее.",
         },
         files: {
             title: "Файлы",
@@ -1309,6 +1358,8 @@ const de = {
         useCpuDisableTitle: "Erzwungene CPU-Kodierung deaktivieren (Überschreibt nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Statische Bildverbesserung aktivieren (Bereinigt statische Bereiche des Bildschirms)",
         usePaintOverQualityDisableTitle: "Statische Bildverbesserung deaktivieren (Bereinigt statische Bereiche des Bildschirms)",
+        binaryClipboardEnableTitle: "Bild-Zwischenablage aktivieren",
+        binaryClipboardDisableTitle: "Bild-Zwischenablage deaktivieren",
     },
     sections: {
         video: {
@@ -1362,6 +1413,9 @@ const de = {
             antiAliasingLabel: "Kantenglättung",
             antiAliasingEnableTitle: "Kantenglättung aktivieren (Glättung bei Skalierung)",
             antiAliasingDisableTitle: "Kantenglättung deaktivieren (Verpixelung erzwingen)",
+            useNativeCursorStylesLabel: "CSS-Cursor verwenden",
+            useNativeCursorStylesEnableTitle: "CSS-Cursor-Rendering verwenden (Systemcursor ersetzen)",
+            useNativeCursorStylesDisableTitle: "Canvas-Cursor-Rendering verwenden (Auf Canvas zeichnen)",
         },
         stats: {
             title: "Statistiken",
@@ -1387,6 +1441,8 @@ const de = {
             title: "Zwischenablage",
             label: "Server-Zwischenablage:",
             placeholder: "Inhalt der Zwischenablage vom Server...",
+            binaryModeLabel: "Bildunterstützung",
+            binaryModeDetails: "Ermöglicht das Kopieren und Einfügen von Bildern in die und aus der Remote-Sitzung.",
         },
         files: {
             title: "Dateien",
@@ -1491,6 +1547,8 @@ const tr = {
         useCpuDisableTitle: "CPU Kodlamasını Zorla Devre Dışı Bırak (nvenc/vaapi'yi geçersiz kılar)",
         usePaintOverQualityEnableTitle: "Statik İyileştirmeyi Etkinleştir (Ekranın statik kısımlarını temizler)",
         usePaintOverQualityDisableTitle: "Statik İyileştirmeyi Devre Dışı Bırak (Ekranın statik kısımlarını temizler)",
+        binaryClipboardEnableTitle: "Resim Panosunu Etkinleştir",
+        binaryClipboardDisableTitle: "Resim Panosunu Devre Dışı Bırak",
     },
     sections: {
         video: {
@@ -1544,6 +1602,9 @@ const tr = {
             antiAliasingLabel: "Kenar Yumuşatma",
             antiAliasingEnableTitle: "Kenar yumuşatmayı etkinleştir (ölçeklemede pürüzsüzleştir)",
             antiAliasingDisableTitle: "Kenar yumuşatmayı devre dışı bırak (pikselli olmaya zorla)",
+            useNativeCursorStylesLabel: "CSS imleçlerini kullan",
+            useNativeCursorStylesEnableTitle: "CSS imleç işlemeyi kullan (Sistem imleçlerini değiştir)",
+            useNativeCursorStylesDisableTitle: "Kanvas imleç işlemeyi kullan (Kanvasa çiz)",
         },
         stats: {
             title: "İstatistikler",
@@ -1569,6 +1630,8 @@ const tr = {
             title: "Pano",
             label: "Sunucu Panosu:",
             placeholder: "Sunucudan pano içeriği...",
+            binaryModeLabel: "Resim Desteği",
+            binaryModeDetails: "Uzak oturuma ve oturumdan resim kopyalayıp yapıştırmaya izin verir.",
         },
         files: {
             title: "Dosyalar",
@@ -1673,6 +1736,8 @@ const it = {
         useCpuDisableTitle: "Disabilita Codifica CPU Forzata (Sovrascrive nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Abilita Miglioramento Statico (Pulisce le porzioni statiche dello schermo)",
         usePaintOverQualityDisableTitle: "Disabilita Miglioramento Statico (Pulisce le porzioni statiche dello schermo)",
+        binaryClipboardEnableTitle: "Abilita Appunti Immagine",
+        binaryClipboardDisableTitle: "Disabilita Appunti Immagine",
     },
     sections: {
         video: {
@@ -1726,6 +1791,9 @@ const it = {
             antiAliasingLabel: "Anti-aliasing",
             antiAliasingEnableTitle: "Abilita anti-aliasing (smussa durante il ridimensionamento)",
             antiAliasingDisableTitle: "Disabilita anti-aliasing (forza la pixelatura)",
+            useNativeCursorStylesLabel: "Usa cursori CSS",
+            useNativeCursorStylesEnableTitle: "Usa rendering del cursore CSS (Sostituisce i cursori di sistema)",
+            useNativeCursorStylesDisableTitle: "Usa rendering del cursore su canvas (Disegna su canvas)",
         },
         stats: {
             title: "Statistiche",
@@ -1751,6 +1819,8 @@ const it = {
             title: "Appunti",
             label: "Appunti del Server:",
             placeholder: "Contenuto degli appunti dal server...",
+            binaryModeLabel: "Supporto Immagini",
+            binaryModeDetails: "Consente di copiare e incollare immagini da e verso la sessione remota.",
         },
         files: {
             title: "File",
@@ -1855,6 +1925,8 @@ const nl = {
         useCpuDisableTitle: "Forceer CPU-codering uitschakelen (Overschrijft nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Statische Verbetering inschakelen (Ruimt statische delen van het scherm op)",
         usePaintOverQualityDisableTitle: "Statische Verbetering uitschakelen (Ruimt statische delen van het scherm op)",
+        binaryClipboardEnableTitle: "Afbeeldingenklembord inschakelen",
+        binaryClipboardDisableTitle: "Afbeeldingenklembord uitschakelen",
     },
     sections: {
         video: {
@@ -1908,6 +1980,9 @@ const nl = {
             antiAliasingLabel: "Randverzachting",
             antiAliasingEnableTitle: "Randverzachting inschakelen (vloeiend bij schalen)",
             antiAliasingDisableTitle: "Randverzachting uitschakelen (gepixeleerd forceren)",
+            useNativeCursorStylesLabel: "CSS-cursors gebruiken",
+            useNativeCursorStylesEnableTitle: "CSS-cursorweergave gebruiken (Vervangt systeemcursors)",
+            useNativeCursorStylesDisableTitle: "Canvas-cursorweergave gebruiken (Tekenen op canvas)",
         },
         stats: {
             title: "Statistieken",
@@ -1933,6 +2008,8 @@ const nl = {
             title: "Klembord",
             label: "Server Klembord:",
             placeholder: "Klembord inhoud van server...",
+            binaryModeLabel: "Afbeeldingsondersteuning",
+            binaryModeDetails: "Staat het kopiëren en plakken van afbeeldingen van en naar de externe sessie toe.",
         },
         files: {
             title: "Bestanden",
@@ -2037,6 +2114,8 @@ const ar = {
         useCpuDisableTitle: "تعطيل فرض ترميز CPU (يتجاوز nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "تمكين تحسين الصورة الثابتة (ينظف الأجزاء الثابتة من الشاشة)",
         usePaintOverQualityDisableTitle: "تعطيل تحسين الصورة الثابتة (ينظف الأجزاء الثابتة من الشاشة)",
+        binaryClipboardEnableTitle: "تمكين حافظة الصور",
+        binaryClipboardDisableTitle: "تعطيل حافظة الصور",
     },
     sections: {
         video: {
@@ -2090,6 +2169,9 @@ const ar = {
             antiAliasingLabel: "تنعيم الحواف",
             antiAliasingEnableTitle: "تمكين تنعيم الحواف (سلس عند التكبير)",
             antiAliasingDisableTitle: "تعطيل تنعيم الحواف (فرض البيكسلات)",
+            useNativeCursorStylesLabel: "استخدام مؤشرات CSS",
+            useNativeCursorStylesEnableTitle: "استخدام عرض مؤشر CSS (استبدال مؤشرات النظام)",
+            useNativeCursorStylesDisableTitle: "استخدام عرض مؤشر اللوحة (الرسم على اللوحة)",
         },
         stats: {
             title: "الإحصائيات",
@@ -2115,6 +2197,8 @@ const ar = {
             title: "الحافظة",
             label: "حافظة الخادم:",
             placeholder: "محتوى الحافظة من الخادم...",
+            binaryModeLabel: "دعم الصور",
+            binaryModeDetails: "يسمح بنسخ ولصق الصور من وإلى الجلسة البعيدة.",
         },
         files: {
             title: "الملفات",
@@ -2219,6 +2303,8 @@ const ko = {
         useCpuDisableTitle: "강제 CPU 인코딩 비활성화 (nvenc/vaapi 재정의)",
         usePaintOverQualityEnableTitle: "정적 영역 개선 활성화 (화면의 정적 부분을 정리합니다)",
         usePaintOverQualityDisableTitle: "정적 영역 개선 비활성화 (화면의 정적 부분을 정리합니다)",
+        binaryClipboardEnableTitle: "이미지 클립보드 활성화",
+        binaryClipboardDisableTitle: "이미지 클립보드 비활성화",
     },
     sections: {
         video: {
@@ -2272,6 +2358,9 @@ const ko = {
             antiAliasingLabel: "안티에일리어싱",
             antiAliasingEnableTitle: "안티에일리어싱 활성화 (확대/축소 시 부드럽게)",
             antiAliasingDisableTitle: "안티에일리어싱 비활성화 (픽셀화 강제)",
+            useNativeCursorStylesLabel: "CSS 커서 사용",
+            useNativeCursorStylesEnableTitle: "CSS 커서 렌더링 사용 (시스템 커서 대체)",
+            useNativeCursorStylesDisableTitle: "캔버스 커서 렌더링 사용 (캔버스에 그리기)",
         },
         stats: {
             title: "통계",
@@ -2297,6 +2386,8 @@ const ko = {
             title: "클립보드",
             label: "서버 클립보드:",
             placeholder: "서버의 클립보드 내용...",
+            binaryModeLabel: "이미지 지원",
+            binaryModeDetails: "원격 세션에서 이미지를 복사하고 붙여넣을 수 있습니다.",
         },
         files: {
             title: "파일",
@@ -2401,6 +2492,8 @@ const ja = {
         useCpuDisableTitle: "強制 CPU エンコーディングを無効にする (nvenc/vaapi を上書き)",
         usePaintOverQualityEnableTitle: "静止領域の補正を有効にする (画面の静的な部分をクリーンアップします)",
         usePaintOverQualityDisableTitle: "静止領域の補正を無効にする (画面の静的な部分をクリーンアップします)",
+        binaryClipboardEnableTitle: "画像クリップボードを有効にする",
+        binaryClipboardDisableTitle: "画像クリップボードを無効にする",
     },
     sections: {
         video: {
@@ -2454,6 +2547,9 @@ const ja = {
             antiAliasingLabel: "アンチエイリアシング",
             antiAliasingEnableTitle: "アンチエイリアシングを有効にする (スケーリング時に滑らかに)",
             antiAliasingDisableTitle: "アンチエイリアシングを無効にする (ピクセル化を強制)",
+            useNativeCursorStylesLabel: "CSS カーソルを使用",
+            useNativeCursorStylesEnableTitle: "CSS カーソルレンダリングを使用 (システムカーソルを置換)",
+            useNativeCursorStylesDisableTitle: "キャンバスカーソルレンダリングを使用 (キャンバスに描画)",
         },
         stats: {
             title: "統計",
@@ -2479,6 +2575,8 @@ const ja = {
             title: "クリップボード",
             label: "サーバークリップボード:",
             placeholder: "サーバーからのクリップボードの内容...",
+            binaryModeLabel: "画像サポート",
+            binaryModeDetails: "リモートセッションとの間で画像をコピー＆ペーストできます。",
         },
         files: {
             title: "ファイル",
@@ -2583,6 +2681,8 @@ const vi = {
         useCpuDisableTitle: "Tắt Mã hóa CPU Bắt buộc (Ghi đè nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Bật Cải thiện vùng tĩnh (Dọn dẹp các phần tĩnh của màn hình)",
         usePaintOverQualityDisableTitle: "Tắt Cải thiện vùng tĩnh (Dọn dẹp các phần tĩnh của màn hình)",
+        binaryClipboardEnableTitle: "Bật Bộ nhớ tạm cho Hình ảnh",
+        binaryClipboardDisableTitle: "Tắt Bộ nhớ tạm cho Hình ảnh",
     },
     sections: {
         video: {
@@ -2636,6 +2736,9 @@ const vi = {
             antiAliasingLabel: "Khử răng cưa",
             antiAliasingEnableTitle: "Bật khử răng cưa (làm mịn khi co giãn)",
             antiAliasingDisableTitle: "Tắt khử răng cưa (buộc hiển thị pixel)",
+            useNativeCursorStylesLabel: "Sử dụng con trỏ CSS",
+            useNativeCursorStylesEnableTitle: "Sử dụng kết xuất con trỏ CSS (Thay thế con trỏ hệ thống)",
+            useNativeCursorStylesDisableTitle: "Sử dụng kết xuất con trỏ canvas (Vẽ lên canvas)",
         },
         stats: {
             title: "Thống kê",
@@ -2661,6 +2764,8 @@ const vi = {
             title: "Bộ nhớ tạm",
             label: "Bộ nhớ tạm Máy chủ:",
             placeholder: "Nội dung bộ nhớ tạm từ máy chủ...",
+            binaryModeLabel: "Hỗ trợ Hình ảnh",
+            binaryModeDetails: "Cho phép sao chép và dán hình ảnh đến và từ phiên làm việc từ xa.",
         },
         files: {
             title: "Tệp",
@@ -2765,6 +2870,8 @@ const th = {
         useCpuDisableTitle: "ปิดใช้งานการเข้ารหัส CPU แบบบังคับ (เขียนทับ nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "เปิดใช้งานการปรับปรุงพื้นที่นิ่ง (ทำความสะอาดส่วนที่หยุดนิ่งของหน้าจอ)",
         usePaintOverQualityDisableTitle: "ปิดใช้งานการปรับปรุงพื้นที่นิ่ง (ทำความสะอาดส่วนที่หยุดนิ่งของหน้าจอ)",
+        binaryClipboardEnableTitle: "เปิดใช้งานคลิปบอร์ดรูปภาพ",
+        binaryClipboardDisableTitle: "ปิดใช้งานคลิปบอร์ดรูปภาพ",
     },
     sections: {
         video: {
@@ -2818,6 +2925,9 @@ const th = {
             antiAliasingLabel: "การลบรอยหยัก",
             antiAliasingEnableTitle: "เปิดใช้งานการลบรอยหยัก (ปรับให้เรียบเมื่อปรับขนาด)",
             antiAliasingDisableTitle: "ปิดใช้งานการลบรอยหยัก (บังคับให้เป็นพิกเซล)",
+            useNativeCursorStylesLabel: "ใช้เคอร์เซอร์แบบ CSS",
+            useNativeCursorStylesEnableTitle: "ใช้การแสดงผลเคอร์เซอร์แบบ CSS (แทนที่เคอร์เซอร์ของระบบ)",
+            useNativeCursorStylesDisableTitle: "ใช้การแสดงผลเคอร์เซอร์บนแคนวาส (วาดลงบนแคนวาส)",
         },
         stats: {
             title: "สถิติ",
@@ -2843,6 +2953,8 @@ const th = {
             title: "คลิปบอร์ด",
             label: "คลิปบอร์ดเซิร์ฟเวอร์:",
             placeholder: "เนื้อหาคลิปบอร์ดจากเซิร์ฟเวอร์...",
+            binaryModeLabel: "รองรับรูปภาพ",
+            binaryModeDetails: "อนุญาตให้คัดลอกและวางรูปภาพไปยังและจากเซสชันระยะไกล",
         },
         files: {
             title: "ไฟล์",
@@ -2947,6 +3059,8 @@ const fil = {
         useCpuDisableTitle: "Huwag paganahin ang Puwersahang CPU Encoding (Pinapalitan ang nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Paganahin ang Paglilinis ng Static (Nililinis ang mga static na bahagi ng screen)",
         usePaintOverQualityDisableTitle: "Huwag paganahin ang Paglilinis ng Static (Nililinis ang mga static na bahagi ng screen)",
+        binaryClipboardEnableTitle: "Paganahin ang Clipboard ng Imahe",
+        binaryClipboardDisableTitle: "Huwag paganahin ang Clipboard ng Imahe",
     },
     sections: {
         video: {
@@ -3000,6 +3114,9 @@ const fil = {
             antiAliasingLabel: "Anti-aliasing (Pagpapakinis)",
             antiAliasingEnableTitle: "Paganahin ang anti-aliasing (makinis kapag nag-scale)",
             antiAliasingDisableTitle: "Huwag paganahin ang anti-aliasing (puwersahing maging pixelated)",
+            useNativeCursorStylesLabel: "Gamitin ang mga CSS cursor",
+            useNativeCursorStylesEnableTitle: "Gamitin ang pag-render ng CSS cursor (Palitan ang mga cursor ng system)",
+            useNativeCursorStylesDisableTitle: "Gamitin ang pag-render ng canvas cursor (Iguhit sa canvas)",
         },
         stats: {
             title: "Stats",
@@ -3025,6 +3142,8 @@ const fil = {
             title: "Clipboard",
             label: "Server Clipboard:",
             placeholder: "Nilalaman ng clipboard mula sa server...",
+            binaryModeLabel: "Suporta sa Imahe",
+            binaryModeDetails: "Pinapayagan ang pag-copy at pag-paste ng mga imahe papunta at mula sa remote session.",
         },
         files: {
             title: "Mga File",
@@ -3129,6 +3248,8 @@ const da = {
         useCpuDisableTitle: "Deaktiver Tvungen CPU-kodning (Tilsidesætter nvenc/vaapi)",
         usePaintOverQualityEnableTitle: "Aktiver Statisk Forbedring (Rydder op i statiske dele af skærmen)",
         usePaintOverQualityDisableTitle: "Deaktiver Statisk Forbedring (Rydder op i statiske dele af skærmen)",
+        binaryClipboardEnableTitle: "Aktiver billedudklipsholder",
+        binaryClipboardDisableTitle: "Deaktiver billedudklipsholder",
     },
     sections: {
         video: {
@@ -3182,6 +3303,9 @@ const da = {
             antiAliasingLabel: "Kantudjævning",
             antiAliasingEnableTitle: "Aktiver kantudjævning (glat ved skalering)",
             antiAliasingDisableTitle: "Deaktiver kantudjævning (tving pixeleret)",
+            useNativeCursorStylesLabel: "Brug CSS-markører",
+            useNativeCursorStylesEnableTitle: "Brug CSS-markørgengivelse (Erstatter systemmarkører)",
+            useNativeCursorStylesDisableTitle: "Brug lærredsmarkørgengivelse (Tegn på lærred)",
         },
         stats: {
             title: "Statistik",
@@ -3207,6 +3331,8 @@ const da = {
             title: "Udklipsholder",
             label: "Server Udklipsholder:",
             placeholder: "Indhold fra serverens udklipsholder...",
+            binaryModeLabel: "Billedstøtte",
+            binaryModeDetails: "Tillader kopiering og indsættelse af billeder til og fra den eksterne session.",
         },
         files: {
             title: "Filer",

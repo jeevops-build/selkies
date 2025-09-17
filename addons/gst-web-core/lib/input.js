@@ -1127,6 +1127,7 @@ export class Input {
         this._cursorImageBitmap = null;
         this._rawHotspotX = 0;
         this._rawHotspotY = 0;
+        this.useBrowserCursors = false;
         this._latestMouseX = 0;
         this._latestMouseY = 0;
         this.useCssScaling = useCssScaling;
@@ -1149,6 +1150,7 @@ export class Input {
         this._wheelThreshold = 100;
         this._scrollMagnitude = 10;
         this.cursorScaleFactor = null;
+        this._cursorBase64Data = null;
 
         this._guacKeyboardID = Input._nextGuacID++;
         this._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_' + this._guacKeyboardID;
@@ -1211,7 +1213,7 @@ export class Input {
     }
 
     _handleOutsideClick(event) {
-        if (!this.element.contains(event.target)) {
+        if (!this.useBrowserCursors && !this.element.contains(event.target)) {
             this.cursorDiv.style.display = 'none';
         }
     }
@@ -1223,21 +1225,41 @@ export class Input {
         }
     }
 
+    _updateBrowserCursor() {
+        if (!this._cursorBase64Data) {
+            this.element.style.cursor = 'none';
+            return;
+        }
+        const cursorDataUrl = `data:image/png;base64,${this._cursorBase64Data}`;
+        this.element.style.cursor = `url("${cursorDataUrl}") ${this._rawHotspotX} ${this._rawHotspotY}, default`;
+    }
+
     async updateServerCursor(cursorData) {
         if (!cursorData.curdata ||
             parseInt(cursorData.handle, 10) === 0 ||
             this._trackpadMode)
         {
-            this.cursorDiv.style.display = 'none';
             this._cursorImageBitmap = null;
+            this._cursorBase64Data = null;
+            this.cursorDiv.style.display = 'none';
+            if (this.useBrowserCursors) {
+                this.element.style.cursor = 'none';
+            }
             return;
         }
         this._rawHotspotX = parseInt(cursorData.hotx) || 0;
         this._rawHotspotY = parseInt(cursorData.hoty) || 0;
-        const blob = await (await fetch(`data:image/png;base64,${cursorData.curdata}`)).blob();
-        this._cursorImageBitmap = await createImageBitmap(blob);
-        this.cursorDiv.style.display = 'block';
-        this._drawAndScaleCursor();
+        this._cursorBase64Data = cursorData.curdata;
+        if (this.useBrowserCursors) {
+            this.cursorDiv.style.display = 'none';
+            this._updateBrowserCursor();
+        } else {
+            const blob = await (await fetch(`data:image/png;base64,${this._cursorBase64Data}`)).blob();
+            this._cursorImageBitmap = await createImageBitmap(blob);
+            this.element.style.cursor = 'none';
+            this.cursorDiv.style.display = 'block';
+            this._drawAndScaleCursor();
+        }
     }
 
     setSynth(isSynth) {
@@ -1549,8 +1571,8 @@ export class Input {
     }
 
     _mouseButtonMovement(event) {
-        this.cursorDiv.style.display = 'block';
-        if (this.element.style.cursor !== 'none') {
+        if (!this.useBrowserCursors) {
+            this.cursorDiv.style.display = 'block';
             this.element.style.cursor = 'none';
         }
         let visualClientX = event.clientX;
@@ -1563,7 +1585,9 @@ export class Input {
                 visualClientY = lastPredictedEvent.clientY;
             }
         }
-        this._updateCursorPosition(visualClientX, visualClientY);
+        if (!this.useBrowserCursors) {
+            this._updateCursorPosition(visualClientX, visualClientY);
+        }
         this._latestMouseX = visualClientX;
         this._latestMouseY = visualClientY;
         if (this._trackpadMode) return;
@@ -1863,12 +1887,40 @@ export class Input {
             this._sendMouseState();
         }
 
-        if (this._trackpadMode) {
+        if (this._trackpadMode || this.useBrowserCursors) {
             this.cursorDiv.style.display = 'none';
             this.element.style.cursor = 'default';
         } else {
             this.element.style.cursor = 'none';
             this.cursorDiv.style.display = 'none';
+        }
+    }
+
+    async setUseBrowserCursors(enabled) {
+        const newMode = !!enabled;
+        if (this.useBrowserCursors === newMode) {
+            return;
+        }
+        console.log(`Input: Use browser cursors ${newMode ? 'enabled' : 'disabled'}.`);
+        this.useBrowserCursors = newMode;
+        if (this._trackpadMode) {
+            this.cursorDiv.style.display = 'none';
+            this.element.style.cursor = 'none';
+        } else if (this.useBrowserCursors) {
+            this.cursorDiv.style.display = 'none';
+            this._updateBrowserCursor();
+        } else {
+            this.element.style.cursor = 'none';
+            if (this._cursorBase64Data && !this._cursorImageBitmap) {
+                const blob = await (await fetch(`data:image/png;base64,${this._cursorBase64Data}`)).blob();
+                this._cursorImageBitmap = await createImageBitmap(blob);
+            }
+            if (this._cursorImageBitmap) {
+                this.cursorDiv.style.display = 'block';
+                this._drawAndScaleCursor();
+            } else {
+                this.cursorDiv.style.display = 'none';
+            }
         }
     }
 
@@ -1888,7 +1940,9 @@ export class Input {
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
 
         if (type === 'touchstart') {
-            this.cursorDiv.style.display = 'block';
+            if (!this.useBrowserCursors) {
+                this.cursorDiv.style.display = 'block';
+            }
             for (let i = 0; i < event.changedTouches.length; i++) {
                 const touch = event.changedTouches[i];
                 if (!this._activeTouches.has(touch.identifier)) {
@@ -1944,7 +1998,9 @@ export class Input {
             } else {
                 if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
                 if (touchCount === 2) {
-                    this.cursorDiv.style.visibility = 'hidden';
+                    if (!this.useBrowserCursors) {
+                        this.cursorDiv.style.visibility = 'hidden';
+                    }
                     this._isTwoFingerGesture = true; this._activeTouchIdentifier = null;
                     const touches = Array.from(this._activeTouches.values());
                     this._touchScrollLastCentroid = {
@@ -2050,7 +2106,7 @@ export class Input {
             if (!swipeDetected) {
                 const remainingTouchCount = this._activeTouches.size;
                 if (this._isTwoFingerGesture && remainingTouchCount < 2) {
-                    if (!this._trackpadMode) {
+                    if (!this._trackpadMode && !this.useBrowserCursors) {
                         this.cursorDiv.style.visibility = 'visible';
                     }
                     this._isTwoFingerGesture = false;
@@ -2205,9 +2261,11 @@ export class Input {
     _pointerLock() {
         if (document.pointerLockElement === this.element) {
             this.send("p,1");
+            this.send("SET_NATIVE_CURSOR_RENDERING,1");
         } else {
             this.send("p,0");
-            this.resetKeyboard(); // Release keys when pointer lock is lost
+            this.send("SET_NATIVE_CURSOR_RENDERING,0");
+            this.resetKeyboard();
         }
     }
 
